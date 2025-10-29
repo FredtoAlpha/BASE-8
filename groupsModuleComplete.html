@@ -165,6 +165,30 @@
     }
   }
 
+  function downloadBase64File(base64Data, fileName, mimeType) {
+    try {
+      const byteCharacters = atob(base64Data);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      const blob = new Blob([byteArray], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const link = documentRef.createElement('a');
+      link.href = url;
+      link.download = fileName;
+      documentRef.body.appendChild(link);
+      link.click();
+      documentRef.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      return true;
+    } catch (error) {
+      console.error('❌ Erreur downloadBase64File:', error);
+      return false;
+    }
+  }
+
   function formatDate(date) {
     return new Date(date).toLocaleString('fr-FR', {
       day: '2-digit',
@@ -2155,8 +2179,68 @@
   }
 
   function exportToPDF() {
-    showToast('Export PDF en développement', 'info');
-    // TODO: Implémenter export PDF
+    if (!state.generatedGroups || state.generatedGroups.length === 0) {
+      showToast('Aucun groupe à exporter', 'warning');
+      return;
+    }
+
+    if (!google?.script?.run) {
+      showToast('Google Apps Script non disponible', 'error');
+      return;
+    }
+
+    const sanitizeStudent = (student) => ({
+      id: student.id,
+      nom: student.nom,
+      prenom: student.prenom,
+      sexe: student.sexe,
+      classe: student.classe,
+      lv2: student.lv2,
+      opt: student.opt,
+      scores: {
+        F: student.scores?.F ?? student.scoreF ?? '',
+        M: student.scores?.M ?? student.scoreM ?? '',
+        COM: student.scores?.COM ?? student.com ?? '',
+        TRA: student.scores?.TRA ?? student.tra ?? '',
+        PART: student.scores?.PART ?? student.part ?? ''
+      }
+    });
+
+    const payload = {
+      type: state.groupType,
+      config: {
+        groupTypeLabel: GROUP_TYPES[state.groupType]?.title || state.groupType,
+        selectedClasses: state.selectedClasses,
+        numGroups: state.numGroups,
+        subjectLabel: state.groupType === 'needs' ? (SUBJECTS[state.selectedSubject]?.label || state.selectedSubject) : undefined,
+        distributionLabel: state.groupType === 'needs' ? (DISTRIBUTION_TYPES[state.distributionType]?.label || state.distributionType) : undefined,
+        languageLabel: state.groupType === 'language' ? state.selectedLanguage : undefined
+      },
+      groups: state.generatedGroups.map(group => ({
+        name: group.name,
+        students: (group.students || []).map(sanitizeStudent)
+      }))
+    };
+
+    showToast('📄 Génération du PDF...', 'info');
+
+    google.script.run
+      .withSuccessHandler((result) => {
+        if (result && result.success && result.data) {
+          const downloaded = downloadBase64File(result.data, result.fileName || 'groupes.pdf', result.mimeType || 'application/pdf');
+          if (downloaded) {
+            showToast('✅ PDF généré et téléchargé', 'success');
+          } else {
+            showToast('Erreur lors du téléchargement du PDF', 'error');
+          }
+        } else {
+          showToast(`Erreur export PDF: ${result?.error || 'Résultat invalide'}`, 'error');
+        }
+      })
+      .withFailureHandler(error => {
+        showToast(`Erreur export PDF : ${error?.message || error}`, 'error');
+      })
+      .exportGroupsToPDF(payload);
   }
 
   function exportToCSV() {
