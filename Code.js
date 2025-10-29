@@ -91,7 +91,7 @@ function showAnalytics() {
 function showGroupsModule() {
   const html = HtmlService.createHtmlOutputFromFile('groupsModuleComplete')
     .setWidth(1400)
-    .setHeight(800)
+    .setHeight(1400)
     .setTitle('👥 Groupes de Besoin');
   SpreadsheetApp.getUi().showModalDialog(html, 'Groupes');
 }
@@ -133,6 +133,360 @@ function showSystemLogs() {
     'Un visualiseur de logs sera disponible dans BASE 5 HUB.',
     ui.ButtonSet.OK
   );
+}
+
+/**************************** 🆕 AUDIT LOGGING SYSTEM *********************************/
+
+/**
+ * SPRINT #5: Socle de Journalisation Centralisée
+ * Traçabilité complète des opérations critiques
+ * Conforme RGPD avec historique versioning
+ */
+
+/**
+ * Journalise une opération critique du module groupes
+ * @param {string} operation - Type d'opération (CREATE, SAVE, FINALIZE, RESTORE, DELETE)
+ * @param {string} groupType - Type de groupes (needs, language, option)
+ * @param {object} metadata - Données contextuelles (groupName, count, mode, etc.)
+ */
+function logGroupOperation(operation, groupType, metadata = {}) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let auditSheet = ss.getSheetByName('_AUDIT_LOG');
+
+    // Créer _AUDIT_LOG si absent
+    if (!auditSheet) {
+      console.log('📋 Création de l\'onglet _AUDIT_LOG...');
+      auditSheet = ss.insertSheet('_AUDIT_LOG');
+      auditSheet.appendRow([
+        'Timestamp',
+        'Operation',
+        'GroupType',
+        'GroupName',
+        'StudentCount',
+        'Mode',
+        'User',
+        'Status',
+        'Details',
+        'SnapshotCreated'
+      ]);
+      auditSheet.setFrozenRows(1);
+      auditSheet.hideSheet();
+    }
+
+    // Construire la ligne d'audit
+    const timestamp = new Date().toISOString();
+    const user = Session.getActiveUser().getEmail() || 'UNKNOWN';
+    const groupName = metadata.groupName || '';
+    const studentCount = metadata.count || metadata.studentCount || 0;
+    const mode = metadata.mode || metadata.saveMode || '';
+    const status = metadata.status || 'SUCCESS';
+    const details = JSON.stringify(metadata.details || {});
+    const snapshotCreated = metadata.snapshotCreated || '';
+
+    // Ajouter la ligne
+    auditSheet.appendRow([
+      timestamp,
+      operation,
+      groupType,
+      groupName,
+      studentCount,
+      mode,
+      user,
+      status,
+      details,
+      snapshotCreated
+    ]);
+
+    console.log(`✅ Audit enregistré: ${operation} | ${groupType} | ${groupName} | ${user}`);
+
+    return { success: true, timestamp, operation, groupName };
+  } catch (e) {
+    console.error('❌ Erreur logGroupOperation:', e.toString());
+    return { success: false, error: e.toString() };
+  }
+}
+
+/**
+ * Récupère l'historique d'audit pour un groupe
+ * @param {string} groupName - Nom du groupe (ex: grBe1)
+ * @param {number} limit - Nombre de lignes à retourner
+ */
+function getAuditLog(groupName, limit = 50) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const auditSheet = ss.getSheetByName('_AUDIT_LOG');
+
+    if (!auditSheet) {
+      return { success: false, error: 'Aucun journal d\'audit trouvé', logs: [] };
+    }
+
+    const data = auditSheet.getDataRange().getValues();
+    const headers = data[0];
+
+    // Trouver l'index de la colonne GroupName
+    const groupNameIndex = headers.indexOf('GroupName');
+    if (groupNameIndex === -1) {
+      return { success: false, error: 'Colonne GroupName introuvable', logs: [] };
+    }
+
+    // Filtrer et formater
+    const logs = data
+      .slice(1)
+      .filter(row => row[groupNameIndex] === groupName)
+      .reverse()
+      .slice(0, limit)
+      .map((row, idx) => ({
+        index: idx + 1,
+        timestamp: row[headers.indexOf('Timestamp')],
+        operation: row[headers.indexOf('Operation')],
+        groupType: row[headers.indexOf('GroupType')],
+        studentCount: row[headers.indexOf('StudentCount')],
+        mode: row[headers.indexOf('Mode')],
+        user: row[headers.indexOf('User')],
+        status: row[headers.indexOf('Status')],
+        details: row[headers.indexOf('Details')],
+        snapshotCreated: row[headers.indexOf('SnapshotCreated')]
+      }));
+
+    return { success: true, groupName, logs, count: logs.length };
+  } catch (e) {
+    console.error('❌ Erreur getAuditLog:', e.toString());
+    return { success: false, error: e.toString(), logs: [] };
+  }
+}
+
+/**
+ * Récupère toutes les opérations d'audit sur une période
+ * @param {string} startDate - Date de début (ISO format)
+ * @param {string} endDate - Date de fin (ISO format)
+ */
+function getAuditLogByDateRange(startDate, endDate) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const auditSheet = ss.getSheetByName('_AUDIT_LOG');
+
+    if (!auditSheet) {
+      return { success: false, error: 'Aucun journal d\'audit trouvé', logs: [] };
+    }
+
+    const data = auditSheet.getDataRange().getValues();
+    const headers = data[0];
+    const timestampIndex = headers.indexOf('Timestamp');
+
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+
+    const logs = data
+      .slice(1)
+      .filter(row => {
+        const rowDate = new Date(row[timestampIndex]);
+        return rowDate >= start && rowDate <= end;
+      })
+      .map(row => ({
+        timestamp: row[timestampIndex],
+        operation: row[headers.indexOf('Operation')],
+        groupType: row[headers.indexOf('GroupType')],
+        groupName: row[headers.indexOf('GroupName')],
+        user: row[headers.indexOf('User')],
+        status: row[headers.indexOf('Status')]
+      }));
+
+    return { success: true, logs, count: logs.length };
+  } catch (e) {
+    console.error('❌ Erreur getAuditLogByDateRange:', e.toString());
+    return { success: false, error: e.toString(), logs: [] };
+  }
+}
+
+/**
+ * Génère un rapport d'audit au format JSON (pour export)
+ * @param {string} groupName - Groupe à auditer
+ */
+function exportAuditReport(groupName) {
+  try {
+    const auditData = getAuditLog(groupName, 100);
+    if (!auditData.success) {
+      return { success: false, error: auditData.error };
+    }
+
+    const report = {
+      title: `Rapport d'Audit - ${groupName}`,
+      generatedAt: new Date().toISOString(),
+      group: groupName,
+      totalOperations: auditData.count,
+      operations: auditData.logs,
+      summary: {
+        creates: auditData.logs.filter(l => l.operation === 'CREATE').length,
+        saves: auditData.logs.filter(l => l.operation === 'SAVE').length,
+        finalizes: auditData.logs.filter(l => l.operation === 'FINALIZE').length,
+        restores: auditData.logs.filter(l => l.operation === 'RESTORE').length,
+        deletes: auditData.logs.filter(l => l.operation === 'DELETE').length
+      }
+    };
+
+    return { success: true, report, json: JSON.stringify(report, null, 2) };
+  } catch (e) {
+    console.error('❌ Erreur exportAuditReport:', e.toString());
+    return { success: false, error: e.toString() };
+  }
+}
+
+/**
+ * 🆕 GROUPINGS METADATA - PropertiesService storage/retrieval (SPRINT #6)
+ */
+
+function storeGroupingMetadata(groupType, groupingId, metadata) {
+  const ps = PropertiesService.getUserProperties();
+  const key = `GROUPING_${groupType}_${groupingId}`;
+  ps.setProperty(key, JSON.stringify(metadata));
+  console.log(`✅ Stored grouping metadata: ${key}`);
+}
+
+function loadGroupingMetadata(groupType, groupingId) {
+  const ps = PropertiesService.getUserProperties();
+  const key = `GROUPING_${groupType}_${groupingId}`;
+  const data = ps.getProperty(key);
+  return data ? JSON.parse(data) : null;
+}
+
+function getGroupingMetadataList(groupType) {
+  const ps = PropertiesService.getUserProperties();
+  const allProps = ps.getProperties();
+  const prefix = `GROUPING_${groupType}_`;
+  const result = {};
+
+  for (const key in allProps) {
+    if (key.startsWith(prefix)) {
+      const groupingId = key.substring(prefix.length);
+      result[groupingId] = JSON.parse(allProps[key]);
+    }
+  }
+  return result;
+}
+
+function deleteGroupingMetadata(groupType, groupingId) {
+  const ps = PropertiesService.getUserProperties();
+  const key = `GROUPING_${groupType}_${groupingId}`;
+  ps.deleteProperty(key);
+  console.log(`🗑️  Deleted grouping metadata: ${key}`);
+}
+
+/**
+ * Get next available offset for a specific grouping
+ * Scans sheets for pattern: typePrefix + groupingId + number + optional TEMP
+ * Example: if using "A" as groupingId: grBeA1, grBeA2, grBeA3TEMP → returns 4
+ * Or if no groupingId: grBe1, grBe2, grBe3 → returns 4
+ */
+function getNextOffsetForGrouping(typePrefix, groupingId) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = ss.getSheets();
+  let maxNum = 0;
+
+  for (const sheet of sheets) {
+    const name = sheet.getName();
+
+    // Pattern matching depends on whether groupingId is used
+    let pattern;
+    if (groupingId && groupingId !== 'default') {
+      // Pattern: grBe${groupingId}${number}(TEMP)?
+      // Example: grBeA1, grBeA2, grBeA3TEMP
+      pattern = new RegExp(`^${typePrefix}${groupingId}(\\d+)(TEMP)?$`);
+    } else {
+      // Pattern: grBe${number}(TEMP)?
+      // Example: grBe1, grBe2, grBe3TEMP
+      pattern = new RegExp(`^${typePrefix}(\\d+)(TEMP)?$`);
+    }
+
+    const match = name.match(pattern);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (num > maxNum) maxNum = num;
+    }
+  }
+
+  return maxNum + 1;
+}
+
+/**
+ * Get offset range (min-max) for a grouping
+ * Returns {min: X, max: Y, count: Z}
+ */
+function getGroupingOffsetRange(typePrefix, groupingId) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = ss.getSheets();
+  let minNum = null;
+  let maxNum = null;
+
+  for (const sheet of sheets) {
+    const name = sheet.getName();
+
+    let pattern;
+    if (groupingId && groupingId !== 'default') {
+      pattern = new RegExp(`^${typePrefix}${groupingId}(\\d+)(TEMP)?$`);
+    } else {
+      pattern = new RegExp(`^${typePrefix}(\\d+)(TEMP)?$`);
+    }
+
+    const match = name.match(pattern);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (minNum === null || num < minNum) minNum = num;
+      if (maxNum === null || num > maxNum) maxNum = num;
+    }
+  }
+
+  if (minNum === null || maxNum === null) {
+    return { min: null, max: null, count: 0 };
+  }
+
+  return {
+    min: minNum,
+    max: maxNum,
+    count: maxNum - minNum + 1
+  };
+}
+
+/**
+ * List all TEMP sheets for a grouping
+ */
+function listGroupingTempSheets(typePrefix, groupingId) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = ss.getSheets();
+  const result = [];
+
+  for (const sheet of sheets) {
+    const name = sheet.getName();
+
+    let pattern;
+    if (groupingId && groupingId !== 'default') {
+      pattern = new RegExp(`^${typePrefix}${groupingId}(\\d+)TEMP$`);
+    } else {
+      pattern = new RegExp(`^${typePrefix}(\\d+)TEMP$`);
+    }
+
+    if (name.match(pattern)) {
+      result.push(name);
+    }
+  }
+
+  return result.sort();
+}
+
+/**
+ * Delete all TEMP sheets for a grouping (used for cleanup/reset)
+ */
+function deleteGroupingTempSheets(typePrefix, groupingId) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const tempSheets = listGroupingTempSheets(typePrefix, groupingId);
+
+  for (const sheetName of tempSheets) {
+    const sheet = ss.getSheetByName(sheetName);
+    if (sheet) {
+      ss.deleteSheet(sheet);
+      console.log(`🗑️  Deleted TEMP sheet for grouping: ${sheetName}`);
+    }
+  }
 }
 
 /**************************** FONCTIONS LEGACY PIPELINE *********************************/
@@ -1793,6 +2147,7 @@ function loadFINSheetsWithScores() {
         // I(8): TRA
         // J(9): PART
         // K(10): ABS
+        // O(14): SOURCE ← classe d'origine/année précédente
         // U(20): SCORE F ← CRITIQUE
         // V(21): SCORE M ← CRITIQUE
 
@@ -1811,6 +2166,7 @@ function loadFINSheetsWithScores() {
           sexe: (row[4] || '').toString().trim().toUpperCase(),
           lv2: (row[5] || '').toString().trim(),
           opt: (row[6] || '').toString().trim(),
+          source: (row[14] || '').toString().trim(),  // Colonne O : classe d'origine
           scores: {
             // 🔑 SCORES ACADÉMIQUES (CRITIQUES POUR L'ALGORITHME DE GROUPES)
             F: scoreF,    // Colonne U : Score Français
@@ -2345,25 +2701,35 @@ function saveGroup(groupName, data, options = {}) {
         'LV2', 'OPT', 'SOURCE'
       ];
 
-      rowData = data.map(s => [
-        s.id || '',
-        s.nom || '',
-        s.prenom || '',
-        s.sexe || '',
-        s.classe || '',
-        s.scores?.F ?? (s.scoreF ?? ''), // Gérer les deux formats
-        s.scores?.M ?? (s.scoreM ?? ''), // Gérer les deux formats
-        s.scores?.COM ?? (s.com ?? ''),
-        s.scores?.TRA ?? (s.tra ?? ''),
-        s.scores?.PART ?? (s.part ?? ''),
-        s.scores?.ABS ?? (s.abs ?? ''),
-        s.lv2 || '',
-        s.opt || '',
-        s.source || ''
-      ]);
+      rowData = data.map(s => {
+        // CORRECTIF B : Normaliser les scores F et M avec fallback robuste
+        const scoreF = Number(s?.scores?.F ?? s?.scoreF ?? 0);
+        const scoreM = Number(s?.scores?.M ?? s?.scoreM ?? 0);
+        return [
+          s.id || '',
+          s.nom || '',
+          s.prenom || '',
+          s.sexe || '',
+          s.classe || '',
+          Number.isFinite(scoreF) ? scoreF : 0,
+          Number.isFinite(scoreM) ? scoreM : 0,
+          Number(s?.scores?.COM ?? s?.com ?? 0),
+          Number(s?.scores?.TRA ?? s?.tra ?? 0),
+          Number(s?.scores?.PART ?? s?.part ?? 0),
+          Number(s?.scores?.ABS ?? s?.abs ?? 0),
+          s.lv2 || '',
+          s.opt || '',
+          s.source || ''
+        ];
+      });
 
-      if (data.length > 0 && (rowData[0][5] === '' || rowData[0][5] === undefined) && (rowData[0][6] === '' || rowData[0][6] === undefined)) {
-         console.warn(`⚠️ Données de score F/M manquantes ou vides pour ${groupName}. Vérifiez l'objet élève: ${JSON.stringify(data[0])}`);
+      // Vérification que les scores ne sont pas 0 (au moins un doit avoir une valeur)
+      if (data.length > 0) {
+        const f = rowData[0][5];
+        const m = rowData[0][6];
+        if ((f === 0 || f === null) && (m === 0 || m === null)) {
+          console.warn(`⚠️ Données de score F/M à 0 pour ${groupName}. Vérifiez l'objet élève: ${JSON.stringify(data[0])}`);
+        }
       }
 
     } else {
@@ -2494,18 +2860,20 @@ function saveGroupsToSheets(payload) {
       }
 
       const groupName = group.name || ('Groupe ' + (idx + 1));
-      const eleveIds = group.students.map(s => s.id);
+      // CORRECTIF B : Passer les objets élèves COMPLETS au lieu des IDs
+      const studentsData = group.students;
 
-      console.log('   👥 ' + groupName + ': ' + eleveIds.length + ' élèves');
+      console.log('   👥 ' + groupName + ': ' + studentsData.length + ' élèves');
 
-      const result = saveGroup(groupName, eleveIds);
+      // Appeler saveGroup avec isFullData: true pour écrire un en-tête complet avec SCORE_F/M
+      const result = saveGroup(groupName, studentsData, { isFullData: true });
       results.push({
         groupName: groupName,
         ...result
       });
 
       if (result.success) {
-        totalEleves += eleveIds.length;
+        totalEleves += studentsData.length;
       }
     });
 
@@ -2525,12 +2893,214 @@ function saveGroupsToSheets(payload) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  HELPERS POUR GESTION QUOTA GOOGLE SHEETS (10M cellules)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Supprime tous les onglets TEMP correspondant à un préfixe donné
+ * Ex: deleteT empSheetsByPrefix_('grBe') → supprime grBe1TEMP, grBe2TEMP, ...
+ */
+function deleteTempSheetsByPrefix_(prefix) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheets = ss.getSheets().slice(); // copie pour éviter les mutations pendant la boucle
+
+    sheets.forEach(sh => {
+      const name = sh.getName();
+      if (name.startsWith(prefix) && name.endsWith('TEMP')) {
+        console.log('   🗑️ Suppression: ' + name);
+        ss.deleteSheet(sh); // libère immédiatement les cellules
+      }
+    });
+    console.log('   ✅ Purge TEMP [' + prefix + '*] terminée');
+  } catch (e) {
+    console.error('   ❌ Erreur lors de la purge:', e.toString());
+  }
+}
+
+/**
+ * Réduit un onglet aux dimensions strictement nécessaires
+ * Supprime les lignes et colonnes excédentaires après insertSheet()
+ */
+function shrinkSheet_(sh, rowsNeeded, colsNeeded) {
+  try {
+    const minRows = Math.max(2, rowsNeeded); // 1 header + au minimum 1 data
+    const minCols = Math.max(1, colsNeeded);
+
+    const maxRows = sh.getMaxRows();
+    const maxCols = sh.getMaxColumns();
+
+    // Supprimer les lignes excédentaires (au-delà de minRows)
+    if (maxRows > minRows) {
+      const rowsToDelete = maxRows - minRows;
+      sh.deleteRows(minRows + 1, rowsToDelete);
+      console.log('      [shrink] Supprimé ' + rowsToDelete + ' lignes (total: ' + maxRows + ' → ' + minRows + ')');
+    }
+
+    // Supprimer les colonnes excédentaires (au-delà de minCols)
+    if (maxCols > minCols) {
+      const colsToDelete = maxCols - minCols;
+      sh.deleteColumns(minCols + 1, colsToDelete);
+      console.log('      [shrink] Supprimé ' + colsToDelete + ' colonnes (total: ' + maxCols + ' → ' + minCols + ')');
+    }
+  } catch (e) {
+    console.error('      ❌ Erreur shrinkSheet_:', e.toString());
+  }
+}
+
+/**
+ * Calcule le nombre total de cellules RÉELLEMENT UTILISÉES dans tous les onglets du classeur
+ * CORRECTION : compte getLastRow() * getLastColumn() (cellules utilisées)
+ * et non getMaxRows() * getMaxColumns() (cellules allouées par Google = 1000×26 par défaut)
+ */
+function totalCells_(ss) {
+  var total = 0;
+  var sheets = ss.getSheets();
+
+  for (var i = 0; i < sheets.length; i++) {
+    var sh = sheets[i];
+    var name = sh.getName();
+
+    // Ignorer les onglets système (commençant par _)
+    if (name.indexOf('_') === 0) {
+      continue;
+    }
+
+    // Compter seulement les cellules réellement utilisées
+    var lastRow = sh.getLastRow();
+    var lastCol = sh.getLastColumn();
+
+    if (lastRow > 0 && lastCol > 0) {
+      var sheetCells = lastRow * lastCol;
+      total += sheetCells;
+      console.log('  [totalCells_] ' + name + ': ' + lastRow + ' lignes × ' + lastCol + ' colonnes = ' + sheetCells + ' cellules');
+    }
+  }
+
+  console.log('  [totalCells_] TOTAL: ' + total + ' cellules utilisées');
+  return total;
+}
+
+/**
+ * Vérifie si ajouter les groupes dépasserait le quota de 10M cellules
+ */
+function willExceedCap_(ss, groups, headerLen) {
+  const current = totalCells_(ss);
+  // Estimation conservative : 2 lignes (header + 1 data en moyenne) × nombre de colonnes
+  const addPerGroup = 2 * Math.max(14, headerLen);
+  const projected = current + (groups.length * addPerGroup);
+
+  console.log('   📊 Capacité actuelle: ' + current.toLocaleString() + ' / 10 000 000 cellules');
+  console.log('   📊 Projection après ajout: ' + projected.toLocaleString() + ' cellules');
+
+  return projected > 9900000; // marge de sécurité
+}
+
+/**
+ * Vérifie si la création de N nouvelles feuilles ferait sauter le quota 10M cellules.
+ * Hypothèse : chaque insertSheet() démarre à ~1000 lignes x 26 colonnes ≈ 26 000 cellules.
+ *
+ * CORRECTIF D : ES5-compatible, pas d'underscores dans les nombres
+ */
+function willExceedCapForNewSheets_(ss, newSheetsCount) {
+  var DEFAULT_NEW_SHEET_CELLS = 1000 * 26; // ~26 000 cellules par nouvelle feuille
+  var current = totalCells_(ss); // totalCells_() existe déjà dans ton fichier
+  var projected = current + (newSheetsCount * DEFAULT_NEW_SHEET_CELLS);
+
+  console.log('Capacité actuelle : ' + current.toLocaleString() + ' / 10 000 000 cellules');
+  console.log(
+    'Projection après création (' + newSheetsCount + ' nouvelles feuilles) : ' +
+    projected.toLocaleString()
+  );
+
+  // marge de sécu : on bloque si on dépasse environ 9.9M avant même insertSheet
+  return projected > 9900000;
+}
+
+/**
+ * Détecte le plus grand numéro existant pour un préfixe donné
+ * Ex: si grBe1TEMP, grBe2TEMP, grBe4TEMP existent, retourne 4
+ * Cela permet la numérotation CONTINUE d'une phase à l'autre
+ */
+function getMaxGroupNumber_(ss, typePrefix) {
+  var sheets = ss.getSheets();
+  var maxNum = 0;
+  var regex = new RegExp('^' + typePrefix + '(\\d+)TEMP$');
+
+  for (var i = 0; i < sheets.length; i++) {
+    var shName = sheets[i].getName();
+    var match = shName.match(regex);
+    if (match) {
+      var num = parseInt(match[1], 10);
+      if (num > maxNum) {
+        maxNum = num;
+      }
+    }
+  }
+  return maxNum;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  🆕 SPRINT #6: MULTI-PASS ISOLATION (Sheet Naming with GroupingId)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Génère un ID court pour un regroupement (pour isolation namespace)
+ * Input: "Passe 1" ou UUID "grp_a1b2c3d4"
+ * Output: "p1a2b3c" (8 chars max, alphanumeric, no underscores for sheet names)
+ */
+function getGroupingShortId(groupingId) {
+  if (!groupingId) return 'default';
+
+  // Si c'est déjà un format court, retourner tel quel
+  if (groupingId.length <= 8) return groupingId.substring(0, 8);
+
+  // Sinon, extraire 8 chars du hash (début + fin)
+  var hash = groupingId.substring(0, 6) + groupingId.substring(groupingId.length - 2);
+  return hash.replace(/[^a-zA-Z0-9]/g, '').substring(0, 8);
+}
+
+/**
+ * Construit le nom de feuille TEMP avec isolation par regroupement
+ * Exemple: grBe_p1a2b3c_1TEMP
+ */
+function getTempSheetName(typePrefix, groupingId, groupNumber) {
+  var shortId = getGroupingShortId(groupingId);
+  return typePrefix + '_' + shortId + '_' + groupNumber + 'TEMP';
+}
+
+/**
+ * Construit le nom de feuille FINAL (sans TEMP) avec isolation par regroupement
+ * Exemple: grBe_p1a2b3c_1
+ */
+function getFinalSheetName(typePrefix, groupingId, groupNumber) {
+  var shortId = getGroupingShortId(groupingId);
+  return typePrefix + '_' + shortId + '_' + groupNumber;
+}
+
+/**
+ * Extrait le groupingId court d'un nom de feuille
+ * Input: "grBe_p1a2b3c_1TEMP"
+ * Output: "p1a2b3c"
+ */
+function extractGroupingIdFromSheet(sheetName) {
+  var match = sheetName.match(/^[a-zA-Z]+_([a-zA-Z0-9]+)_\d+/);
+  return match ? match[1] : null;
+}
+
 /**
  * Sauvegarde les groupes générés dans des onglets TEMPORAIRES (cachés)
  * Préfixes : grBe (Besoin), grLv (Langue), grOp (Options)
- * Exemple : grBe1TEMP, grBe2TEMP, grBe3TEMP, grBe4TEMP
  *
- * CORRECTION V2 : Passe les objets élèves complets à saveGroup au lieu des IDs.
+ * SPRINT #6 : Support multi-pass avec isolation
+ * Exemple : grBe_p1a2b3c_1TEMP, grBe_p1a2b3c_2TEMP, grBe_xyz9def_1TEMP
+ * - Chaque regroupement a son propre namespace de feuilles
+ * - Numérotation continue au sein de chaque regroupement
+ * - Les passes précédentes ne sont jamais affectées
+ *
+ * Payload: { type, groupingId, saveMode, offsetStart, groups[], ... }
+ * ES5-compatible : pas de const/let, pas d'underscores, pas d'emoji côté serveur.
  */
 const CONTINUATION_METADATA_PREFIX = 'GROUPS_CONTINUATION_';
 
@@ -2581,13 +3151,65 @@ function saveTempGroups(payload) {
       return { success: false, error: 'Payload invalide ou groups manquants' };
     }
 
-    // Déterminer le prefix selon le type
-    let typePrefix = 'grOp'; // défaut
+    // Déterminer le préfixe en fonction du type demandé
+    var typePrefix = 'grOp'; // défaut "autre / options"
     if (payload.type === 'needs') {
-      typePrefix = 'grBe'; // Besoin = Be
+      typePrefix = 'grBe'; // besoins / besoins éducatifs
     } else if (payload.type === 'language') {
-      typePrefix = 'grLv'; // Langue = Lv
+      typePrefix = 'grLv'; // langues
     }
+
+    // 🆕 SPRINT #6: Extraire groupingId (isolation par pass)
+    var groupingId = payload.groupingId || 'default';
+    var shortGroupingId = getGroupingShortId(groupingId);
+
+    var saveMode = payload.saveMode || 'append';
+    console.log('🆕 saveTempGroups [SPRINT #6 Multi-pass] - Début');
+    console.log('Type:', payload.type);
+    console.log('Prefix:', typePrefix);
+    console.log('GroupingId:', groupingId + ' (short: ' + shortGroupingId + ')');
+    console.log('SaveMode:', saveMode);
+    console.log('Nombre de groupes:', payload.groups.length);
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var results = [];
+    var totalEleves = 0;
+
+    // ÉTAPE PRÉALABLE : Déterminer le startNum (numéro de départ) POUR CE REGROUPEMENT
+    var startNum = 1;
+
+    // Si offsetStart fourni explicitement (par UI), l'utiliser
+    if (payload.offsetStart && payload.offsetStart > 0) {
+      startNum = payload.offsetStart;
+      console.log('✅ offsetStart fourni par UI: ' + startNum);
+    } else if (saveMode === 'append') {
+      // Mode APPEND : CUMUL POUR CE REGROUPEMENT - Détecter le max numéro de CE regroupement uniquement
+      var maxTempNum = 0;
+      var maxFinalNum = 0;
+      var sheets = ss.getSheets();
+
+      for (var checkIdx = 0; checkIdx < sheets.length; checkIdx++) {
+        var shName = sheets[checkIdx].getName();
+        var shGroupingId = extractGroupingIdFromSheet(shName);
+
+        // 🆕 SPRINT #6: Chercher max SEULEMENT dans les feuilles de CE regroupement
+        if (shGroupingId === shortGroupingId && shName.endsWith('TEMP')) {
+          var match = shName.match(/_\d+TEMP$/);
+          if (match) {
+            var numStr = match[0].replace(/_/,'').replace('TEMP','');
+            var num = parseInt(numStr, 10);
+            if (num > maxTempNum) maxTempNum = num;
+          }
+        }
+        // Chercher max dans les groupes finalisés DE CE REGROUPEMENT (pas TEMP, pas snapshots)
+        if (shGroupingId === shortGroupingId && !shName.endsWith('TEMP') && !shName.includes('_snapshot_')) {
+          var matchFin = shName.match(/_(\d+)$/);
+          if (matchFin) {
+            var numFin = parseInt(matchFin[1], 10);
+            if (numFin > maxFinalNum) maxFinalNum = numFin;
+          }
+        }
+      }
 
     const persistMode = payload.persistMode === 'continue' ? 'continue' : 'replace';
     const requestedOffset = typeof payload.offsetStart === 'number' ? payload.offsetStart : parseInt(payload.offsetStart, 10);
@@ -2598,9 +3220,10 @@ function saveTempGroups(payload) {
     console.log('   PersistMode: ' + persistMode);
     console.log('   Nombre de groupes: ' + payload.groups.length);
 
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const results = [];
-    let totalEleves = 0;
+      for (var d = 0; d < tempToDelete.length; d++) {
+        console.log('  Suppression TEMP: ' + tempToDelete[d].getName());
+        ss.deleteSheet(tempToDelete[d]);
+      }
 
     const metadata = {
       config: payload.config || {},
@@ -2649,6 +3272,26 @@ function saveTempGroups(payload) {
     for (let idx = 0; idx < payload.groups.length; idx++) {
       const group = payload.groups[idx];
 
+    // --- ÉTAPE 1 : sécurité quota AVANT de créer des nouvelles feuilles
+    if (newSheetsNeeded > 0) {
+      console.log('Nouvelles feuilles potentielles à créer:', newSheetsNeeded);
+      if (willExceedCapForNewSheets_(ss, newSheetsNeeded)) {
+        return {
+          success: false,
+          error:
+            'Capacité presque pleine : création de ' + newSheetsNeeded +
+            ' nouvelle(s) feuille(s) dépasserait la limite 10M cellules. ' +
+            'Supprimez / archivez des feuilles avant de continuer.'
+        };
+      }
+    }
+
+    // --- ÉTAPE 2 : écrire chaque groupe dans sa feuille avec nouveau naming (isolation)
+    // IMPORTANT :
+    // saveGroup() réutilise la feuille si elle existe (clear()).
+    // Il NE fait insertSheet() QUE si la feuille n'existe pas.
+    for (var i = 0; i < payload.groups.length; i++) {
+      var group = payload.groups[i];
       if (!group || !Array.isArray(group.students)) {
         console.warn('   ⚠️ Groupe ' + idx + ' invalide');
         logGroupOperation({
@@ -2667,15 +3310,15 @@ function saveTempGroups(payload) {
       const tempGroupName = typePrefix + currentIndex + 'TEMP';
       const studentsData = group.students;
 
-      console.log('   👥 ' + tempGroupName + ': ' + studentsData.length + ' élèves');
+      console.log(tempGroupName + ': ' + studentsData.length + ' élèves');
       if (studentsData.length > 0) {
-        console.log('      🔍 Premier élève du groupe (vérification scores):', {
-          id: studentsData[0].id,
-          nom: studentsData[0].nom,
-          scoreF: studentsData[0].scoreF,
-          scoreM: studentsData[0].scoreM,
-          scores: studentsData[0].scores
-        });
+        console.log(
+          'Premier élève:',
+          studentsData[0].id,
+          studentsData[0].nom,
+          studentsData[0].scoreF,
+          studentsData[0].scoreM
+        );
       }
 
       // Appeler saveGroup avec le nom TEMP et les données complètes
@@ -2703,7 +3346,7 @@ function saveTempGroups(payload) {
         });
         return {
           success: false,
-          error: 'Impossible de créer ' + tempGroupName + ': ' + result.error
+          error: 'Impossible de créer ' + tempGroupName + ': ' + errMsg
         };
       }
 
@@ -2725,17 +3368,50 @@ function saveTempGroups(payload) {
         sh.hideSheet();
         console.log('   👁️ Masqué: ' + name);
       }
-    });
+    }
 
-    console.log('✅ saveTempGroups terminé - ' + totalEleves + ' élèves au total');
+    // --- ÉTAPE 4 : supprimer les TEMP en trop (NUMÉROTATION CONTINUE)
+    // Ne pas supprimer les TEMP existants qu'on n'a pas modifiés dans cette phase
+    // Supprimer SEULEMENT ceux créés dans CETTE phase ET qui seraient au-delà du range
+    // (en fait, avec la numérotation continue, on ne supprime rien - on accumule)
+    // Supprimer uniquement les TEMP orphelins (si le dernier groupe était plus grand avant)
+    var maxNewNum = startNum + payload.groups.length - 1;
+    console.log('Range de groupes créés/modifiés: ' + startNum + ' à ' + maxNewNum);
+
+    // Ne pas supprimer d'anciennes feuilles - la numérotation continue les préserve
+
+    console.log(
+      'saveTempGroups terminé - ' +
+      totalEleves + ' élèves écrits dans ' +
+      payload.groups.length + ' groupe(s).'
+    );
+
+    // 🆕 SPRINT #6: Journalisation avec groupingId
+    var auditResult = logGroupOperation('SAVE', payload.type || 'unknown', {
+      groupName: shortGroupingId + '_' + startNum + '-' + (startNum + payload.groups.length - 1),
+      count: totalEleves,
+      mode: saveMode,
+      status: 'SUCCESS',
+      details: {
+        groupingId: groupingId,
+        groupingIdShort: shortGroupingId,
+        startNum: startNum,
+        endNum: startNum + payload.groups.length - 1,
+        groupsCount: payload.groups.length
+      }
+    });
 
     const offsetEnd = createdIndexes.length > 0 ? Math.max.apply(null, createdIndexes) : offsetStart + (payload.groups.length || 0) - 1;
     const nextOffset = offsetEnd + 1;
     const nowIso = new Date().toISOString();
     const response = {
       success: true,
-      message: 'Groupes sauvegardés temporairement',
+      message: 'Groupes sauvegardés temporairement (isolation par regroupement)',
       typePrefix: typePrefix,
+      groupingId: groupingId,
+      groupingIdShort: shortGroupingId,
+      startNum: startNum,
+      endNum: startNum + payload.groups.length - 1,
       totalGroups: payload.groups.length,
       totalEleves: totalEleves,
       results: results,
@@ -3136,7 +3812,7 @@ function finalizeTempGroups(request) {
       return { success: false, error: 'Type invalide' };
     }
 
-    let typePrefix = 'grOp';
+    var typePrefix = 'grOp';
     if (type === 'needs') typePrefix = 'grBe';
     else if (type === 'language') typePrefix = 'grLv';
 
@@ -3145,17 +3821,148 @@ function finalizeTempGroups(request) {
 
     console.log('✅ finalizeTempGroups pour type: ' + type + ' (prefix: ' + typePrefix + ') - mode ' + persistMode);
 
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const sheets = ss.getSheets();
+    finalizeMode = finalizeMode || 'replace';
+    console.log('🆕 finalizeTempGroups [SPRINT #6 Multi-pass] - Mode: ' + finalizeMode + ' | Type: ' + type + ' | Prefix: ' + typePrefix + ' | GroupingId: ' + (groupingId || 'ALL'));
 
-    // Trouver tous les onglets TEMP pour ce prefix
-    const tempSheets = sheets.filter(sh => sh.getName().startsWith(typePrefix) && sh.getName().endsWith('TEMP'));
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheets = ss.getSheets();
 
-    if (tempSheets.length === 0) {
-      return { success: false, error: 'Aucun groupe temporaire trouvé pour ' + typePrefix };
+    // Trouver tous les onglets TEMP pour ce prefix (ET optionnellement ce groupingId)
+    var tempSheets = [];
+    for (var i = 0; i < sheets.length; i++) {
+      var sh = sheets[i];
+      var name = sh.getName();
+      var shGroupingId = extractGroupingIdFromSheet(name);
+
+      // 🆕 SPRINT #6: Si groupingId spécifié, filtrer SEULEMENT pour ce regroupement
+      if (name.startsWith(typePrefix) && name.endsWith('TEMP')) {
+        if (shortGroupingId && shGroupingId !== shortGroupingId) {
+          // Ignorer les TEMP d'autres regroupements
+          continue;
+        }
+        tempSheets.push(sh);
+      }
     }
 
-    console.log('   Finalisation de ' + tempSheets.length + ' groupes...');
+    if (tempSheets.length === 0) {
+      var errorMsg = 'Aucun groupe temporaire trouvé pour ' + typePrefix;
+      if (groupingId) errorMsg += ' (regroupement: ' + groupingId + ')';
+      return { success: false, error: errorMsg };
+    }
+
+    console.log('   Finalisation de ' + tempSheets.length + ' groupes pour ' + (shortGroupingId || 'tous les regroupements') + '...');
+
+    if (finalizeMode === 'replace') {
+      // MODE REPLACE : Créer snapshots puis supprimer SEULEMENT les finalisés DE CE REGROUPEMENT
+      console.log('   ✅ Mode REPLACE: snapshots + suppression SEULEMENT des groupes finalisés DE CE REGROUPEMENT');
+      var finalSheets = [];
+      for (var j = 0; j < sheets.length; j++) {
+        var sh = sheets[j];
+        var name = sh.getName();
+        var shGroupingId = extractGroupingIdFromSheet(name);
+
+        // 🆕 SPRINT #6: Si groupingId spécifié, filtrer SEULEMENT pour ce regroupement
+        if (name.startsWith(typePrefix) && !name.endsWith('TEMP') && !name.includes('_snapshot_')) {
+          if (shortGroupingId && shGroupingId !== shortGroupingId) {
+            // Ignorer les groupes finalisés d'autres regroupements
+            continue;
+          }
+          finalSheets.push(sh);
+        }
+      }
+
+      // Créer snapshots avant suppression (VERSIONING)
+      console.log('   📸 Création de snapshots de ' + finalSheets.length + ' groupes...');
+      for (var k = 0; k < finalSheets.length; k++) {
+        var groupName = finalSheets[k].getName();
+        var snapshotResult = createGroupSnapshot(groupName);
+        if (snapshotResult.success) {
+          console.log('   ✅ Snapshot créé pour ' + groupName);
+        }
+      }
+
+      // Supprimer les anciens groupes finalisés DE CE REGROUPEMENT
+      for (var k = 0; k < finalSheets.length; k++) {
+        console.log('   🗑️  Suppression de l\'ancien: ' + finalSheets[k].getName());
+        ss.deleteSheet(finalSheets[k]);
+      }
+
+      // Renommer les TEMP en final (en utilisant nouveau naming)
+      for (var m = 0; m < tempSheets.length; m++) {
+        var tempName = tempSheets[m].getName();
+        var finalName = tempName.replace('TEMP', ''); // grBe_p1a2b3c_1TEMP → grBe_p1a2b3c_1
+        console.log('   Renommage: ' + tempName + ' → ' + finalName);
+        tempSheets[m].setName(finalName);
+        tempSheets[m].showSheet();
+      }
+
+    } else if (finalizeMode === 'merge') {
+      // MODE MERGE : Snapshots + PRÉSERVATION des groupes finalisés DE CE REGROUPEMENT + numérotation continue
+      console.log('   ✅ Mode MERGE: snapshots + PRÉSERVATION des groupes + numérotation continue POUR CE REGROUPEMENT');
+
+      // Créer snapshots des groupes existants DE CE REGROUPEMENT avant merge
+      var existingFinalSheets = [];
+      for (var j = 0; j < sheets.length; j++) {
+        var sh = sheets[j];
+        var name = sh.getName();
+        var shGroupingId = extractGroupingIdFromSheet(name);
+
+        // 🆕 SPRINT #6: Si groupingId spécifié, filtrer SEULEMENT pour ce regroupement
+        if (name.startsWith(typePrefix) && !name.endsWith('TEMP') && !name.includes('_snapshot_')) {
+          if (shortGroupingId && shGroupingId !== shortGroupingId) {
+            // Ignorer les groupes finalisés d'autres regroupements
+            continue;
+          }
+          existingFinalSheets.push(sh);
+        }
+      }
+
+      if (existingFinalSheets.length > 0) {
+        console.log('   📸 Création de snapshots des ' + existingFinalSheets.length + ' groupes existants...');
+        for (var k = 0; k < existingFinalSheets.length; k++) {
+          var groupName = existingFinalSheets[k].getName();
+          var snapshotResult = createGroupSnapshot(groupName);
+          if (snapshotResult.success) {
+            console.log('   ✅ Snapshot créé pour ' + groupName);
+          }
+        }
+      }
+
+      // 🆕 SPRINT #6: Déterminer le prochain numéro POUR CE REGROUPEMENT
+      var maxFinalNum = 0;
+      for (var n = 0; n < sheets.length; n++) {
+        var sh = sheets[n];
+        var name = sh.getName();
+        var shGroupingId = extractGroupingIdFromSheet(name);
+
+        // Chercher max SEULEMENT dans les groupes finalisés DE CE REGROUPEMENT
+        if (name.startsWith(typePrefix) && !name.endsWith('TEMP') && !name.includes('_snapshot_')) {
+          if (shortGroupingId && shGroupingId !== shortGroupingId) {
+            continue;
+          }
+          // Extraire le numéro de "grBe_p1a2b3c_3"
+          var match = name.match(/_(\d+)$/);
+          if (match) {
+            var num = parseInt(match[1], 10);
+            if (num > maxFinalNum) maxFinalNum = num;
+          }
+        }
+      }
+
+      var nextNum = maxFinalNum + 1;
+      console.log('   Max final number trouvé (pour ce regroupement): ' + maxFinalNum + ', nextNum: ' + nextNum);
+
+      // Renommer les TEMP en continuant la numérotation (avec nouveau naming)
+      for (var p = 0; p < tempSheets.length; p++) {
+        var tempName = tempSheets[p].getName();
+        var finalName = getFinalSheetName(typePrefix, groupingId, nextNum + p); // grBe_p1a2b3c_3, grBe_p1a2b3c_4...
+        console.log('   Renommage: ' + tempName + ' → ' + finalName);
+        tempSheets[p].setName(finalName);
+        tempSheets[p].showSheet();
+      }
+    }
+
+    console.log('finalizeTempGroups terminé - Groupes rendus visibles');
 
     tempSheets.sort((a, b) => {
       const idxA = extractGroupIndex_(a.getName(), typePrefix) || 0;
@@ -3188,6 +3995,9 @@ function finalizeTempGroups(request) {
       metadata: metadata,
       source: 'finalizeTempGroups'
     });
+    return { success: false, error: e.toString() };
+  }
+}
 
     if (persistMode === 'replace') {
       const finalSheets = sheets.filter(sh => {
@@ -3223,7 +4033,8 @@ function finalizeTempGroups(request) {
       }
     });
 
-    console.log('✅ finalizeTempGroups terminé - Groupes rendus visibles');
+    console.log('✅ Continuation metadata sauvegardée pour ' + type);
+    console.log('   Data: ' + JSON.stringify(enriched).substring(0, 100) + '...');
 
     const continuation = loadContinuationMetadata_(typePrefix);
     const finalRange = renamedIndexes.length > 0
@@ -3258,7 +4069,7 @@ function finalizeTempGroups(request) {
 
     return {
       success: true,
-      message: 'Groupes finalisés et rendus visibles',
+      message: 'Continuation metadata sauvegardée pour ' + type,
       type: type,
       prefix: typePrefix,
       count: tempSheets.length,
