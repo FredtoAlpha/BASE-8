@@ -1346,7 +1346,11 @@
 
   function syncActiveRegroupementState() {
     const regroupement = getActiveRegroupement();
+    
+    console.log('[GroupsModule] 🔄 syncActiveRegroupementState - regroupement:', regroupement?.id, regroupement?.label);
+    
     if (!regroupement) {
+      console.log('[GroupsModule] ⚠️ Aucun regroupement actif - réinitialisation complète');
       state.selectedClasses = [];
       state.numGroups = 3;
       state.persistMode = 'replace';
@@ -1358,6 +1362,9 @@
       return;
     }
 
+    console.log('[GroupsModule] 📋 Classes du regroupement:', regroupement.classes);
+    console.log('[GroupsModule] 🗑️ Purge des élèves de la passe précédente');
+    
     state.selectedClasses = [...regroupement.classes];
     state.numGroups = regroupement.groupCount || state.numGroups || 3;
     state.persistMode = regroupement.persistMode || state.persistMode || 'replace';
@@ -1367,14 +1374,18 @@
     // Forcer le rechargement des élèves des nouvelles classes lors de la prochaine génération
     state.students = [];
     state.studentsById = new Map();
+    
+    console.log('[GroupsModule] ✅ Élèves purgés - rechargement forcé lors de la prochaine génération');
 
     const stored = state.groupsByRegroupement?.[regroupement.id];
     if (stored && Array.isArray(stored.groups)) {
+      console.log('[GroupsModule] 📦 Chargement des groupes sauvegardés:', stored.groups.length);
       state.generatedGroups = stored.groups.map(group => ({
         ...group,
         students: group.students.map(student => ({ ...student }))
       }));
     } else {
+      console.log('[GroupsModule] 📭 Aucun groupe sauvegardé pour ce regroupement');
       state.generatedGroups = [];
     }
 
@@ -1437,16 +1448,22 @@
     if (!Array.isArray(state.generatedGroups) || state.generatedGroups.length === 0) return;
 
     const base = Number(state.tempOffsetStart) || 1;
+    
+    console.log('[GroupsModule] 🔢 Application offset - base:', base, 'groupes:', state.generatedGroups.length);
 
     state.generatedGroups.forEach((group, idx) => {
       const existing = Number(group.index);
       const index = Number.isFinite(existing) && existing > 0 ? existing : base + idx;
+      const oldName = group.name;
       group.index = index;
       
       // 🔴 FIX : Préserver le nom personnalisé si présent, sinon générer un nom par défaut
       // Ne pas écraser les noms issus d'un chargement ou d'une saisie utilisateur
       if (!group.name || group.name === `Groupe ${existing}` || group.name === `Groupe ${idx + 1}`) {
         group.name = `Groupe ${index}`;
+        console.log(`[GroupsModule]   Groupe ${idx}: "${oldName}" → "${group.name}" (nom par défaut)`);
+      } else {
+        console.log(`[GroupsModule]   Groupe ${idx}: "${group.name}" (nom personnalisé préservé)`);
       }
       // Sinon, conserver le nom personnalisé existant
     });
@@ -3203,12 +3220,21 @@
     state.loadError = null;
     updateUI();
 
-    const ensureStudentsReady = state.students && state.students.length > 0
-      ? Promise.resolve(state.students)
-      : loadStudentsFromClasses();
+    // 🔴 FIX : Forcer le rechargement pour les groupes LV2/Options
+    // Car le filtrage dépend de state.selectedLanguage qui peut avoir changé
+    const needsReload = !state.students || state.students.length === 0 || 
+                        state.groupType === 'language' || 
+                        state.groupType === 'option';
+
+    console.log('[GroupsModule] 🔍 generateGroups - needsReload:', needsReload, 'groupType:', state.groupType, 'students:', state.students?.length);
+
+    const ensureStudentsReady = needsReload
+      ? loadStudentsFromClasses()
+      : Promise.resolve(state.students);
 
     ensureStudentsReady
       .then(() => {
+        console.log('[GroupsModule] ✅ Élèves prêts:', state.students.length);
         generateGroupsLocally(); // crée state.generatedGroups
         state.isLoading = false;
         state.currentStep = 2;   // Passer à l'étape 2 (groupes minimalistes)
