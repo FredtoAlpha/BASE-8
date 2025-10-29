@@ -1477,9 +1477,19 @@
     saveModeButtons.forEach(btn => {
       btn.onclick = (e) => {
         const mode = e.target.closest('button').getAttribute('data-mode');
-        state.saveMode = mode;
+
+        // Si persistMode=true (en train de continuer une série), FORCER le mode à 'append'
+        if (state.persistMode && mode === 'replace') {
+          showToast('⚠️ Vous continuez une série! Mode AJOUTER forcé.', 'warning');
+          state.saveMode = 'append';
+        } else {
+          state.saveMode = mode;
+        }
+
         updateUI();
-        showToast(`Mode: ${mode === 'replace' ? 'Remplacer' : 'Ajouter'}`, 'info');
+        const modeLabel = state.saveMode === 'replace' ? 'Remplacer' : 'Ajouter';
+        const persistLabel = state.persistMode ? ` (continue de ${state.lastTempRange.min}-${state.lastTempRange.max})` : '';
+        showToast(`Mode: ${modeLabel}${persistLabel}`, 'info');
       };
     });
 
@@ -2247,11 +2257,15 @@
       .listTempGroups(state.groupType);
 
     function proceedWithSave() {
+      // Si persistMode=true, FORCER saveMode='append' et envoyer l'offsetStart
+      const finalSaveMode = state.persistMode ? 'append' : state.saveMode;
+      const finalOffsetStart = state.persistMode ? state.tempOffsetStart : undefined;
+
       const payload = {
         type: state.groupType,
-        saveMode: state.saveMode,        // 'replace' | 'append'
-        offsetStart: state.tempOffsetStart, // Numéro de départ explicite si en mode "Continuer"
-        persistMode: state.persistMode,   // true = continuer la série
+        saveMode: finalSaveMode,        // Force 'append' si persistMode
+        offsetStart: finalOffsetStart,  // Numéro de départ explicite si persistMode
+        persistMode: state.persistMode, // true = continuer la série
         config: {
           selectedClasses: state.selectedClasses,
           numGroups: state.numGroups,
@@ -2315,10 +2329,11 @@
 
     const typeName = typeMap[state.groupType] || state.groupType;
 
-    // Déterminer le finalizeMode basé sur saveMode
-    // Si saveMode='replace' → finalize='replace' (comportement actuel)
-    // Si saveMode='append' → finalize='merge' (cumule avec existants)
-    const finalizeMode = state.saveMode === 'append' ? 'merge' : 'replace';
+    // Déterminer le finalizeMode basé sur persistMode ET saveMode
+    // Si persistMode=true → finalize='merge' (cumule avec existants, ne supprime pas)
+    // Si persistMode=false ET saveMode='append' → finalize='merge'
+    // Si persistMode=false ET saveMode='replace' → finalize='replace'
+    const finalizeMode = (state.persistMode || state.saveMode === 'append') ? 'merge' : 'replace';
 
     const modeLabel = finalizeMode === 'merge' ? 'en fusionnant' : 'en remplaçant les anciens';
     showToast(`🎯 Finalisation de ${typeName} ${modeLabel}...`, 'info');
@@ -2327,6 +2342,15 @@
       .withSuccessHandler((result) => {
         if (result.success) {
           showToast(`✅ ${typeName} finalisés ! (${result.prefix}1, ${result.prefix}2, ...)`, 'success');
+
+          // Si persistMode était actif, le réinitialiser après finalisation réussie
+          if (state.persistMode) {
+            state.persistMode = false;
+            state.lastTempRange = null;
+            state.tempOffsetStart = 1;
+            console.log('[GroupsModule] persistMode réinitialisé après finalisation');
+          }
+
           console.log('[GroupsModule] Finalisation réussie:', result);
         } else {
           showToast(`Erreur: ${result.error}`, 'error');
