@@ -119,7 +119,12 @@
     showStatistics: true,
 
     // 🆕 Mode de sauvegarde (pour workflow multi-phase)
-    saveMode: 'append'                  // 'replace' | 'append' (défaut append pour workflow multi-phase)
+    saveMode: 'append',                 // 'replace' | 'append' (défaut append pour workflow multi-phase)
+
+    // 🆕 Persistance multi-vagues
+    tempOffsetStart: 1,                 // Numéro de départ pour les groupes TEMP (grBe1, grBe2, etc.)
+    lastTempRange: null,                // Mémorize: { min: 1, max: 3, count: 3 } après chaque sauvegarde
+    persistMode: false                  // Si true, ne pas réinitialiser les groupes au reset
   };
 
   // ═══════════════════════════════════════════════════════════════
@@ -1543,10 +1548,45 @@
   }
 
   function resetToStep1() {
-    state.currentStep = 1;
-    state.groupType = null;
-    state.selectedClasses = [];
-    state.generatedGroups = [];
+    // Si une sauvegarde TEMP précédente existe, proposer "Continuer" vs "Recommencer"
+    if (state.lastTempRange && state.lastTempRange.count > 0) {
+      const continueChoice = confirm(
+        `📊 Vague précédente: ${state.lastTempRange.typePrefix}${state.lastTempRange.min} à ` +
+        `${state.lastTempRange.typePrefix}${state.lastTempRange.max} (${state.lastTempRange.count} groupes)\n\n` +
+        `Voulez-vous AJOUTER une nouvelle vague à cette série?\n\n` +
+        `[OK] Continuer la série (prochains numéros: ${state.tempOffsetStart}+)\n` +
+        `[Annuler] Recommencer une nouvelle série`
+      );
+
+      if (continueChoice) {
+        // Continuer la série: réinitialiser les groupes mais conserver l'offset
+        state.currentStep = 1;
+        state.selectedClasses = [];
+        state.generatedGroups = [];
+        state.persistMode = true; // Flag pour les saveMode par défaut
+        // groupType reste le même
+        showToast(
+          `Prochains groupes seront numérotés à partir de ${state.tempOffsetStart}`,
+          'info'
+        );
+      } else {
+        // Recommencer: réinitialiser TOUT
+        state.currentStep = 1;
+        state.groupType = null;
+        state.selectedClasses = [];
+        state.generatedGroups = [];
+        state.lastTempRange = null;
+        state.tempOffsetStart = 1;
+        state.persistMode = false;
+        showToast('Nouvelle série lancée', 'info');
+      }
+    } else {
+      // Pas de sauvegarde précédente: reset simple
+      state.currentStep = 1;
+      state.groupType = null;
+      state.selectedClasses = [];
+      state.generatedGroups = [];
+    }
     updateUI();
   }
 
@@ -2209,7 +2249,9 @@
     function proceedWithSave() {
       const payload = {
         type: state.groupType,
-        saveMode: state.saveMode,  // 'replace' | 'append'
+        saveMode: state.saveMode,        // 'replace' | 'append'
+        offsetStart: state.tempOffsetStart, // Numéro de départ explicite si en mode "Continuer"
+        persistMode: state.persistMode,   // true = continuer la série
         config: {
           selectedClasses: state.selectedClasses,
           numGroups: state.numGroups,
@@ -2236,7 +2278,18 @@
               `(${result.totalGroups} groupes, ${result.totalEleves} élèves)`,
               'success'
             );
+
+            // 🆕 Mémoriser la plage TEMP pour les vagues suivantes
+            state.lastTempRange = {
+              min: result.startNum,
+              max: result.endNum,
+              count: result.totalGroups,
+              typePrefix: result.typePrefix
+            };
+            state.tempOffsetStart = result.endNum + 1; // Prochain offset
+
             console.log('[GroupsModule] Sauvegarde temp réussie:', result);
+            console.log('[GroupsModule] Mémorisation:', state.lastTempRange);
           } else {
             showToast(`Erreur: ${result.error}`, 'error');
           }

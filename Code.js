@@ -2368,8 +2368,15 @@ function saveTempGroups(payload) {
     var results = [];
     var totalEleves = 0;
 
-    // ÉTAPE PRÉALABLE : Si saveMode='replace', purger les TEMP existants
-    if (saveMode === 'replace') {
+    // ÉTAPE PRÉALABLE : Déterminer le startNum (numéro de départ)
+    var startNum = 1;
+
+    // Si offsetStart fourni explicitement (par UI), l'utiliser
+    if (payload.offsetStart && payload.offsetStart > 0) {
+      startNum = payload.offsetStart;
+      console.log('offsetStart fourni par UI: ' + startNum);
+    } else if (saveMode === 'replace') {
+      // Mode REPLACE: suppression des TEMP existants, recommencer à 1
       console.log('Mode REPLACE: suppression des TEMP existants avec préfixe ' + typePrefix);
       var sheets = ss.getSheets();
       for (var delIdx = 0; delIdx < sheets.length; delIdx++) {
@@ -2379,13 +2386,12 @@ function saveTempGroups(payload) {
           ss.deleteSheet(sheets[delIdx]);
         }
       }
-      // Après suppression, recommencer à 1
-      var startNum = 1;
+      startNum = 1;
       console.log('Groupes seront numérotés de ' + startNum + ' à ' + payload.groups.length);
     } else {
       // Mode APPEND : Détecter le plus grand numéro existant pour NUMÉROTATION CONTINUE
       var maxExisting = getMaxGroupNumber_(ss, typePrefix);
-      var startNum = maxExisting + 1; // Commence à partir du suivant
+      startNum = maxExisting + 1; // Commence à partir du suivant
       console.log('Mode APPEND: Max group number existant pour ' + typePrefix + ': ' + maxExisting);
       console.log('Nouveaux groupes seront numérotés de ' + startNum + ' à ' + (startNum + payload.groups.length - 1));
     }
