@@ -2760,8 +2760,8 @@ function finalizeTempGroups(type, finalizeMode) {
     console.log('   Finalisation de ' + tempSheets.length + ' groupes...');
 
     if (finalizeMode === 'replace') {
-      // MODE REPLACE : Supprimer les anciens groupes finalisés du même type
-      console.log('   Mode REPLACE: suppression des anciens groupes finalisés');
+      // MODE REPLACE : Créer snapshots AVANT suppression, puis supprimer les anciens
+      console.log('   Mode REPLACE: création de snapshots puis suppression des anciens groupes finalisés');
       var finalSheets = [];
       for (var j = 0; j < sheets.length; j++) {
         var sh = sheets[j];
@@ -2771,8 +2771,19 @@ function finalizeTempGroups(type, finalizeMode) {
         }
       }
 
+      // 🆕 SPRINT #4 : Créer snapshots avant suppression (VERSIONING)
+      console.log('   📸 Création de snapshots pour rollback...');
       for (var k = 0; k < finalSheets.length; k++) {
-        console.log('   Suppression de l\'ancien: ' + finalSheets[k].getName());
+        var groupName = finalSheets[k].getName();
+        var snapshotResult = createGroupSnapshot(groupName);
+        if (snapshotResult.success) {
+          console.log('   ✅ Snapshot créé pour ' + groupName);
+        }
+      }
+
+      // Supprimer les anciens groupes finalisés
+      for (var k = 0; k < finalSheets.length; k++) {
+        console.log('   🗑️  Suppression de l\'ancien: ' + finalSheets[k].getName());
         ss.deleteSheet(finalSheets[k]);
       }
 
@@ -2786,8 +2797,30 @@ function finalizeTempGroups(type, finalizeMode) {
       }
 
     } else if (finalizeMode === 'merge') {
-      // MODE MERGE : Trouver le plus grand numéro final existant et continuer la numérotation
-      console.log('   Mode MERGE: préservation des anciens + numérotation continue');
+      // MODE MERGE : Créer snapshots AVANT modification, puis continuer numérotation
+      console.log('   Mode MERGE: création de snapshots puis préservation des anciens + numérotation continue');
+
+      // 🆕 SPRINT #4 : Créer snapshots des groupes existants avant merge (VERSIONING)
+      var existingFinalSheets = [];
+      for (var j = 0; j < sheets.length; j++) {
+        var sh = sheets[j];
+        var name = sh.getName();
+        if (name.startsWith(typePrefix) && !name.endsWith('TEMP')) {
+          existingFinalSheets.push(sh);
+        }
+      }
+
+      if (existingFinalSheets.length > 0) {
+        console.log('   📸 Création de snapshots des groupes existants pour rollback...');
+        for (var k = 0; k < existingFinalSheets.length; k++) {
+          var groupName = existingFinalSheets[k].getName();
+          var snapshotResult = createGroupSnapshot(groupName);
+          if (snapshotResult.success) {
+            console.log('   ✅ Snapshot créé pour ' + groupName);
+          }
+        }
+      }
+
       var maxFinalNum = 0;
       for (var n = 0; n < sheets.length; n++) {
         var sh = sheets[n];
@@ -2827,6 +2860,306 @@ function finalizeTempGroups(type, finalizeMode) {
     };
   } catch (e) {
     console.error('Erreur finalizeTempGroups:', e.toString());
+    return { success: false, error: e.toString() };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SPRINT #1 : PERSISTANCE MULTI-VAGUES (PropertiesService)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Sauvegarde les métadonnées de continuation en PropertiesService
+ * Permet de reprendre une série multi-vagues après rechargement navigateur
+ *
+ * metadata = {
+ *   lastTempRange: {min: 1, max: 3, count: 3, typePrefix: 'grBe'},
+ *   tempOffsetStart: 4,
+ *   persistMode: true,
+ *   timestamp: '2025-10-29T14:30:00Z',
+ *   user: 'teacher@school.fr'
+ * }
+ */
+function saveContinuationMetadata(type, metadata) {
+  try {
+    if (!type || !metadata) {
+      return { success: false, error: 'Type ou metadata manquants' };
+    }
+
+    const props = PropertiesService.getDocumentProperties();
+    const key = 'CONTINUATION_' + type;
+
+    // Enrichir metadata avec timestamp et user
+    const enriched = {
+      ...metadata,
+      timestamp: new Date().toISOString(),
+      user: Session.getActiveUser().getEmail()
+    };
+
+    // Sauvegarder
+    props.setProperty(key, JSON.stringify(enriched));
+
+    console.log('✅ Continuation metadata sauvegardée pour ' + type);
+    console.log('   Data: ' + JSON.stringify(enriched).substring(0, 100) + '...');
+
+    return {
+      success: true,
+      message: 'Continuation metadata sauvegardée pour ' + type,
+      type: type,
+      metadata: enriched
+    };
+  } catch (e) {
+    console.error('❌ Erreur saveContinuationMetadata:', e.toString());
+    return { success: false, error: e.toString() };
+  }
+}
+
+/**
+ * Charge les métadonnées de continuation depuis PropertiesService
+ * Retourne null si aucune métadonnée n'existe
+ */
+function loadContinuationMetadata(type) {
+  try {
+    if (!type) {
+      return { success: false, error: 'Type manquant', metadata: null };
+    }
+
+    const props = PropertiesService.getDocumentProperties();
+    const key = 'CONTINUATION_' + type;
+    const json = props.getProperty(key);
+
+    if (!json) {
+      console.log('ℹ️  Pas de continuation metadata pour ' + type);
+      return { success: true, metadata: null };
+    }
+
+    const metadata = JSON.parse(json);
+    console.log('✅ Continuation metadata chargée pour ' + type);
+    console.log('   Offset start: ' + metadata.tempOffsetStart);
+    console.log('   Last range: ' + metadata.lastTempRange.min + '-' + metadata.lastTempRange.max);
+
+    return {
+      success: true,
+      metadata: metadata,
+      type: type
+    };
+  } catch (e) {
+    console.error('❌ Erreur loadContinuationMetadata:', e.toString());
+    return { success: false, error: e.toString(), metadata: null };
+  }
+}
+
+/**
+ * Supprime les métadonnées de continuation pour un type donné
+ * Appelée lors du "Recommencer une nouvelle série"
+ */
+function clearContinuationMetadata(type) {
+  try {
+    if (!type) {
+      return { success: false, error: 'Type manquant' };
+    }
+
+    const props = PropertiesService.getDocumentProperties();
+    const key = 'CONTINUATION_' + type;
+    props.deleteProperty(key);
+
+    console.log('🗑️  Continuation metadata supprimée pour ' + type);
+
+    return {
+      success: true,
+      message: 'Continuation metadata supprimée pour ' + type,
+      type: type
+    };
+  } catch (e) {
+    console.error('❌ Erreur clearContinuationMetadata:', e.toString());
+    return { success: false, error: e.toString() };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SPRINT #4 : VERSIONING ET SNAPSHOTS
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Crée un snapshot d'un groupe finalisé avant modification
+ * Garde seulement les 5 dernières versions par groupe
+ *
+ * Exemple : grBe1 → grBe1_snapshot_2025-10-29_v1, grBe1_snapshot_2025-10-29_v2, etc.
+ */
+function createGroupSnapshot(groupName) {
+  try {
+    if (!groupName) {
+      return { success: false, error: 'groupName manquant' };
+    }
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const original = ss.getSheetByName(groupName);
+
+    if (!original) {
+      console.warn(`⚠️  Groupe "${groupName}" non trouvé, pas de snapshot créé`);
+      return { success: false, error: `Groupe "${groupName}" non trouvé` };
+    }
+
+    // Créer copie
+    const timestamp = new Date().toISOString().slice(0, 10); // 2025-10-29
+    const copy = original.copyTo(ss);
+    const snapshotName = groupName + '_snapshot_' + timestamp;
+    copy.setName(snapshotName);
+    copy.hideSheet();
+
+    console.log(`✅ Snapshot créé: ${snapshotName}`);
+
+    // Nettoyer les anciens snapshots (garder seulement 5 derniers)
+    const allSheets = ss.getSheets();
+    const snapshots = allSheets
+      .filter(sh => sh.getName().startsWith(groupName + '_snapshot_'))
+      .map(sh => ({
+        sheet: sh,
+        name: sh.getName()
+      }))
+      .sort((a, b) => b.name.localeCompare(a.name)); // Plus récents d'abord
+
+    console.log(`🔍 Snapshots existants pour ${groupName}: ${snapshots.length}`);
+
+    // Supprimer les plus vieux si > 5
+    if (snapshots.length > 5) {
+      const toDelete = snapshots.slice(5);
+      toDelete.forEach(item => {
+        console.log(`🗑️  Suppression du snapshot ancien: ${item.name}`);
+        ss.deleteSheet(item.sheet);
+      });
+    }
+
+    return {
+      success: true,
+      message: `Snapshot créé pour ${groupName}`,
+      snapshotName: snapshotName,
+      timestamp: timestamp,
+      snapshotsCount: Math.min(snapshots.length + 1, 5)
+    };
+  } catch (e) {
+    console.error('❌ Erreur createGroupSnapshot:', e.toString());
+    return { success: false, error: e.toString() };
+  }
+}
+
+/**
+ * Liste tous les snapshots disponibles pour un groupe
+ * Retourne les 5 derniers snapshots (du plus récent au plus ancien)
+ */
+function listGroupSnapshots(groupName) {
+  try {
+    if (!groupName) {
+      return { success: false, error: 'groupName manquant', snapshots: [] };
+    }
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const allSheets = ss.getSheets();
+
+    const snapshots = allSheets
+      .filter(sh => sh.getName().startsWith(groupName + '_snapshot_'))
+      .map(sh => ({
+        name: sh.getName(),
+        timestamp: sh.getName().match(/_snapshot_(\d{4}-\d{2}-\d{2})/)?.[1] || 'unknown'
+      }))
+      .sort((a, b) => b.name.localeCompare(a.name)) // Plus récents d'abord
+      .slice(0, 5); // Seulement 5 derniers
+
+    console.log(`📸 Snapshots pour ${groupName}: ${snapshots.length}`);
+    snapshots.forEach(s => console.log(`   - ${s.name}`));
+
+    return {
+      success: true,
+      groupName: groupName,
+      snapshots: snapshots,
+      count: snapshots.length
+    };
+  } catch (e) {
+    console.error('❌ Erreur listGroupSnapshots:', e.toString());
+    return { success: false, error: e.toString(), snapshots: [] };
+  }
+}
+
+/**
+ * Restaure un groupe à partir d'un snapshot
+ * Remplace le contenu du groupe par celui du snapshot
+ */
+function restoreFromSnapshot(snapshotName) {
+  try {
+    if (!snapshotName) {
+      return { success: false, error: 'snapshotName manquant' };
+    }
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const snapshot = ss.getSheetByName(snapshotName);
+
+    if (!snapshot) {
+      return { success: false, error: `Snapshot "${snapshotName}" non trouvé` };
+    }
+
+    // Extraire le nom du groupe original du snapshot
+    // Ex: grBe1_snapshot_2025-10-29 → grBe1
+    const match = snapshotName.match(/^(.+?)_snapshot_/);
+    const originalGroupName = match ? match[1] : null;
+
+    if (!originalGroupName) {
+      return { success: false, error: `Impossible d'extraire le nom du groupe de "${snapshotName}"` };
+    }
+
+    // Copier le snapshot par-dessus l'original
+    const original = ss.getSheetByName(originalGroupName);
+
+    if (original) {
+      console.log(`🗑️  Suppression de l'ancien groupe: ${originalGroupName}`);
+      ss.deleteSheet(original);
+    }
+
+    // Copier snapshot avec nouveau nom (original)
+    const restoredCopy = snapshot.copyTo(ss);
+    restoredCopy.setName(originalGroupName);
+    restoredCopy.showSheet();
+
+    console.log(`✅ Groupe restauré depuis ${snapshotName} → ${originalGroupName}`);
+
+    return {
+      success: true,
+      message: `Groupe "${originalGroupName}" restauré depuis ${snapshotName}`,
+      originalGroupName: originalGroupName,
+      snapshotName: snapshotName,
+      timestamp: new Date().toISOString()
+    };
+  } catch (e) {
+    console.error('❌ Erreur restoreFromSnapshot:', e.toString());
+    return { success: false, error: e.toString() };
+  }
+}
+
+/**
+ * Supprime un snapshot spécifique
+ */
+function deleteSnapshot(snapshotName) {
+  try {
+    if (!snapshotName) {
+      return { success: false, error: 'snapshotName manquant' };
+    }
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const snapshot = ss.getSheetByName(snapshotName);
+
+    if (!snapshot) {
+      return { success: false, error: `Snapshot "${snapshotName}" non trouvé` };
+    }
+
+    ss.deleteSheet(snapshot);
+    console.log(`🗑️  Snapshot supprimé: ${snapshotName}`);
+
+    return {
+      success: true,
+      message: `Snapshot "${snapshotName}" supprimé`,
+      snapshotName: snapshotName
+    };
+  } catch (e) {
+    console.error('❌ Erreur deleteSnapshot:', e.toString());
     return { success: false, error: e.toString() };
   }
 }

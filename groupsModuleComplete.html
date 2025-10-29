@@ -124,7 +124,10 @@
     // 🆕 Persistance multi-vagues
     tempOffsetStart: 1,                 // Numéro de départ pour les groupes TEMP (grBe1, grBe2, etc.)
     lastTempRange: null,                // Mémorize: { min: 1, max: 3, count: 3 } après chaque sauvegarde
-    persistMode: false                  // Si true, ne pas réinitialiser les groupes au reset
+    persistMode: false,                 // Si true, ne pas réinitialiser les groupes au reset
+
+    // 🆕 SPRINT #1 : Persistance
+    continuationLoaded: false           // Drapeau pour ne charger continuation qu'une fois
   };
 
   // ═══════════════════════════════════════════════════════════════
@@ -524,6 +527,12 @@
   // ═══════════════════════════════════════════════════════════════
 
   function renderStepContent() {
+    // 🆕 SPRINT #1 : Charger continuation metadata une seule fois au step 1
+    if (state.currentStep === 1 && !state.continuationLoaded) {
+      state.continuationLoaded = true;
+      loadContinuationIfNeeded();
+    }
+
     switch (state.currentStep) {
       case 1: return renderStep1_ChooseType();
       case 2: return renderStep2_SelectClasses();
@@ -1086,6 +1095,10 @@
                 <i class="fas fa-download"></i>
                 📥 Charger
               </button>
+              <button type="button" class="action-btn bg-purple-100 hover:bg-purple-200 text-purple-700" data-action="show-snapshots" title="Voir l'historique et restaurer une version antérieure">
+                <i class="fas fa-history"></i>
+                📸 Snapshots
+              </button>
               <button type="button" class="action-btn bg-orange-600 hover:bg-orange-700 text-white" data-action="save-temp-groups" title="Sauvegarder les groupes en version temporaire (cachée)">
                 <i class="fas fa-save"></i>
                 💾 Temp
@@ -1100,15 +1113,25 @@
 
         <!-- Contenu flexible et scrollable -->
         <div class="flex-1 overflow-y-auto">
-          <div class="flex gap-6">
-            <div class="${state.showStatistics ? 'flex-1' : 'w-full'}">
-              <div class="grid ${gridClass} gap-4" id="groups-container">
-                ${state.generatedGroups.map((group, index) => renderGroupCard(group, index)).join('')}
+          ${state.showStatistics ? `
+            <div class="flex gap-6 h-full">
+              <!-- Groupes: flex-shrink-0 pour éviter l'écrasement -->
+              <div class="flex-shrink-0 overflow-y-auto" style="min-width: 50%;">
+                <div class="grid ${gridClass} gap-4 pr-4" id="groups-container">
+                  ${state.generatedGroups.map((group, index) => renderGroupCard(group, index)).join('')}
+                </div>
+              </div>
+
+              <!-- Stats: flex-1 pour prendre l'espace restant -->
+              <div class="flex-1 overflow-y-auto border-l border-slate-200 pl-6">
+                ${renderStatisticsPanel()}
               </div>
             </div>
-
-            ${state.showStatistics ? renderStatisticsPanel() : ''}
-          </div>
+          ` : `
+            <div class="grid ${gridClass} gap-4" id="groups-container">
+              ${state.generatedGroups.map((group, index) => renderGroupCard(group, index)).join('')}
+            </div>
+          `}
         </div>
 
         <!-- Info fixe en bas -->
@@ -1237,6 +1260,15 @@
 
   function getTotalStudents() {
     return state.generatedGroups.reduce((sum, group) => sum + group.students.length, 0);
+  }
+
+  function getGroupPrefix() {
+    const prefixes = {
+      'needs': 'grBe',
+      'language': 'grLV',
+      'option': 'grOpt'
+    };
+    return prefixes[state.groupType] || 'gr';
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -1399,6 +1431,281 @@
     `;
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  //  SPRINT #3 : STATISTIQUES & DASHBOARD
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Calcule les statistiques complètes des groupes générés
+   * Retourne : {byGroup: [...], global: {...}, alerts: [...]}
+   */
+  function calculateStatistics() {
+    if (!Array.isArray(state.generatedGroups) || state.generatedGroups.length === 0) {
+      return { byGroup: [], global: {}, alerts: [] };
+    }
+
+    const stats = {
+      byGroup: [],
+      global: {}
+    };
+
+    // 🔢 STATS PAR GROUPE
+    state.generatedGroups.forEach((group, idx) => {
+      const students = group.students || [];
+      const count = students.length;
+
+      // Scores
+      const scores = students.map(s => {
+        const needScore = getNeedScoreForStudent(s);
+        return Number.isFinite(needScore) ? needScore : 0;
+      });
+      const avgScore = count > 0 ? scores.reduce((a, b) => a + b, 0) / count : 0;
+      const scoreStdDev = count > 1
+        ? Math.sqrt(scores.reduce((sum, s) => sum + Math.pow(s - avgScore, 2), 0) / count)
+        : 0;
+
+      // Parité F/M
+      const girls = students.filter(s => (s.sexe || '').toUpperCase() === 'F').length;
+      const boys = students.filter(s => (s.sexe || '').toUpperCase() === 'M').length;
+
+      // Comportements
+      const comScores = students.map(s => Number(s.com ?? 0));
+      const avgCOM = count > 0 ? comScores.reduce((a, b) => a + b, 0) / count : 0;
+
+      const traScores = students.map(s => Number(s.tra ?? 0));
+      const avgTRA = count > 0 ? traScores.reduce((a, b) => a + b, 0) / count : 0;
+
+      const partScores = students.map(s => Number(s.part ?? 0));
+      const avgPART = count > 0 ? partScores.reduce((a, b) => a + b, 0) / count : 0;
+
+      const absScores = students.map(s => Number(s.abs ?? 0));
+      const avgABS = count > 0 ? absScores.reduce((a, b) => a + b, 0) / count : 0;
+
+      // Source (classe d'origine)
+      const sources = {};
+      students.forEach(s => {
+        const src = s.source || 'Inconnu';
+        sources[src] = (sources[src] || 0) + 1;
+      });
+
+      stats.byGroup.push({
+        idx: idx,
+        name: `Groupe ${state.tempOffsetStart + idx}`,
+        count: count,
+        avgScore: parseFloat(avgScore.toFixed(2)),
+        scoreStdDev: parseFloat(scoreStdDev.toFixed(2)),
+        girls: girls,
+        boys: boys,
+        parityRatio: count > 0 ? (girls / count * 100).toFixed(1) + '%' : '0%',
+        avgCOM: parseFloat(avgCOM.toFixed(2)),
+        avgTRA: parseFloat(avgTRA.toFixed(2)),
+        avgPART: parseFloat(avgPART.toFixed(2)),
+        avgABS: parseFloat(avgABS.toFixed(2)),
+        sources: sources
+      });
+    });
+
+    // 🌍 STATS GLOBALES
+    const sizes = stats.byGroup.map(g => g.count);
+    const avgScores = stats.byGroup.map(g => g.avgScore);
+    const allGirls = stats.byGroup.reduce((s, g) => s + g.girls, 0);
+    const allBoys = stats.byGroup.reduce((s, g) => s + g.boys, 0);
+
+    const meanSize = sizes.reduce((a, b) => a + b, 0) / sizes.length;
+    const meanScore = avgScores.reduce((a, b) => a + b, 0) / avgScores.length;
+
+    stats.global.totalStudents = sizes.reduce((a, b) => a + b, 0);
+    stats.global.numGroups = state.generatedGroups.length;
+    stats.global.avgGroupSize = parseFloat(meanSize.toFixed(2));
+    stats.global.sizeStdDev = Math.sqrt(sizes.reduce((sum, s) => sum + Math.pow(s - meanSize, 2), 0) / sizes.length);
+    stats.global.sizeStdDev = parseFloat(stats.global.sizeStdDev.toFixed(2));
+
+    stats.global.avgScore = parseFloat(meanScore.toFixed(2));
+    stats.global.scoreStdDev = Math.sqrt(avgScores.reduce((sum, s) => sum + Math.pow(s - meanScore, 2), 0) / avgScores.length);
+    stats.global.scoreStdDev = parseFloat(stats.global.scoreStdDev.toFixed(2));
+
+    stats.global.totalGirls = allGirls;
+    stats.global.totalBoys = allBoys;
+    stats.global.globalParityPercent = allGirls + allBoys > 0 ? (allGirls / (allGirls + allBoys) * 100).toFixed(1) : '0';
+
+    // 🚨 ALERTES
+    stats.alerts = [];
+
+    // Alerte 1 : Écart de taille trop grand
+    if (stats.global.sizeStdDev > 2) {
+      stats.alerts.push({
+        level: 'warning',
+        icon: '⚠️',
+        message: `Groupes déséquilibrés en taille (écart-type: ${stats.global.sizeStdDev}). Max écart: ${Math.max(...sizes) - Math.min(...sizes)} élèves`
+      });
+    }
+
+    // Alerte 2 : Écart de score trop grand
+    if (stats.global.scoreStdDev > 1.5) {
+      stats.alerts.push({
+        level: 'warning',
+        icon: '📊',
+        message: `Groupes déséquilibrés en niveau académique (écart-type: ${stats.global.scoreStdDev}). Écart score moyen: ${(Math.max(...avgScores) - Math.min(...avgScores)).toFixed(2)}`
+      });
+    }
+
+    // Alerte 3 : Parité déséquilibrée
+    const parityDiff = Math.abs(allGirls - allBoys);
+    if (parityDiff > 5) {
+      stats.alerts.push({
+        level: 'warning',
+        icon: '👥',
+        message: `Parité F/M déséquilibrée (${allGirls}F / ${allBoys}M, écart: ${parityDiff})`
+      });
+    }
+
+    // Alerte 4 : Un groupe avec beaucoup plus de filles/garçons
+    stats.byGroup.forEach(g => {
+      if (g.count > 0) {
+        const parityPercent = (g.girls / g.count) * 100;
+        if (parityPercent < 30 || parityPercent > 70) {
+          stats.alerts.push({
+            level: 'info',
+            icon: '👤',
+            message: `${g.name} : parité ${(100 - parityPercent).toFixed(0)}M / ${parityPercent.toFixed(0)}F (déséquilibré)`
+          });
+        }
+      }
+    });
+
+    // Alerte 5 : Comportement très dégradé
+    const avgGlobalCOM = stats.byGroup.reduce((s, g) => s + g.avgCOM, 0) / stats.byGroup.length;
+    const avgGlobalABS = stats.byGroup.reduce((s, g) => s + g.avgABS, 0) / stats.byGroup.length;
+    if (avgGlobalCOM < 2) {
+      stats.alerts.push({
+        level: 'info',
+        icon: '⚠️',
+        message: `Comportement moyen très bas (${avgGlobalCOM.toFixed(2)}/5). Vérifiez les données`
+      });
+    }
+
+    console.log('[GroupsModule] 📊 Stats calculées:', stats);
+    return stats;
+  }
+
+  /**
+   * Affiche le dashboard de statistiques
+   */
+  function renderStatisticsPanel() {
+    const stats = calculateStatistics();
+
+    if (stats.byGroup.length === 0) {
+      return `
+        <div class="p-6 bg-amber-50 border border-amber-200 rounded-lg">
+          <p class="text-amber-900 font-semibold">📊 Pas de groupes générés encore</p>
+          <p class="text-amber-800 text-sm mt-2">Générez les groupes d'abord pour voir les statistiques</p>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="space-y-6">
+        <!-- MÉTRIQUES GLOBALES -->
+        <div class="grid md:grid-cols-4 gap-4">
+          <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <p class="text-sm text-blue-700 font-semibold">Total Élèves</p>
+            <p class="text-2xl font-bold text-blue-900">${stats.global.totalStudents}</p>
+            <p class="text-xs text-blue-600 mt-1">dans ${stats.global.numGroups} groupes</p>
+          </div>
+
+          <div class="bg-purple-50 border border-purple-200 rounded-lg p-4">
+            <p class="text-sm text-purple-700 font-semibold">Taille Moyenne</p>
+            <p class="text-2xl font-bold text-purple-900">${stats.global.avgGroupSize}</p>
+            <p class="text-xs text-purple-600 mt-1">σ: ${stats.global.sizeStdDev}</p>
+          </div>
+
+          <div class="bg-green-50 border border-green-200 rounded-lg p-4">
+            <p class="text-sm text-green-700 font-semibold">Niveau Moyen</p>
+            <p class="text-2xl font-bold text-green-900">${stats.global.avgScore}</p>
+            <p class="text-xs text-green-600 mt-1">σ: ${stats.global.scoreStdDev}</p>
+          </div>
+
+          <div class="bg-pink-50 border border-pink-200 rounded-lg p-4">
+            <p class="text-sm text-pink-700 font-semibold">Parité</p>
+            <p class="text-2xl font-bold text-pink-900">${stats.global.globalParityPercent}%</p>
+            <p class="text-xs text-pink-600 mt-1">${stats.global.totalGirls}F / ${stats.global.totalBoys}M</p>
+          </div>
+        </div>
+
+        <!-- ALERTES -->
+        ${stats.alerts.length > 0 ? `
+          <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+            <h4 class="font-semibold text-yellow-900 mb-3">🚨 Alertes Détectées</h4>
+            <div class="space-y-2">
+              ${stats.alerts.map(alert => `
+                <div class="flex items-start gap-2 p-2 bg-white rounded">
+                  <span class="text-lg flex-shrink-0">${alert.icon}</span>
+                  <p class="text-sm text-yellow-900">${alert.message}</p>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        ` : `
+          <div class="bg-green-50 border border-green-200 rounded-lg p-4">
+            <p class="text-green-900 font-semibold">✅ Tous les indicateurs sont équilibrés!</p>
+          </div>
+        `}
+
+        <!-- TABLEAU DÉTAILLÉ PAR GROUPE -->
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm border-collapse">
+            <thead class="bg-slate-100 border-b-2 border-slate-300">
+              <tr>
+                <th class="px-3 py-2 text-left font-semibold text-slate-900">Groupe</th>
+                <th class="px-3 py-2 text-center font-semibold text-slate-900">Effectif</th>
+                <th class="px-3 py-2 text-center font-semibold text-slate-900">Niveau Moy</th>
+                <th class="px-3 py-2 text-center font-semibold text-slate-900">Écart-type</th>
+                <th class="px-3 py-2 text-center font-semibold text-slate-900">Parité F/M</th>
+                <th class="px-3 py-2 text-center font-semibold text-slate-900">COM</th>
+                <th class="px-3 py-2 text-center font-semibold text-slate-900">TRA</th>
+                <th class="px-3 py-2 text-center font-semibold text-slate-900">PART</th>
+                <th class="px-3 py-2 text-center font-semibold text-slate-900">ABS</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${stats.byGroup.map(g => `
+                <tr class="border-b border-slate-200 hover:bg-slate-50">
+                  <td class="px-3 py-2 font-semibold text-slate-900">${g.name}</td>
+                  <td class="px-3 py-2 text-center text-slate-700">${g.count}</td>
+                  <td class="px-3 py-2 text-center text-slate-700">${g.avgScore}</td>
+                  <td class="px-3 py-2 text-center text-slate-600">±${g.scoreStdDev}</td>
+                  <td class="px-3 py-2 text-center text-slate-700">${g.girls}/${g.boys}</td>
+                  <td class="px-3 py-2 text-center ${g.avgCOM < 2 ? 'text-red-700 font-semibold' : 'text-slate-700'}">${g.avgCOM}</td>
+                  <td class="px-3 py-2 text-center text-slate-700">${g.avgTRA}</td>
+                  <td class="px-3 py-2 text-center text-slate-700">${g.avgPART}</td>
+                  <td class="px-3 py-2 text-center ${g.avgABS > 2 ? 'text-red-700 font-semibold' : 'text-slate-700'}">${g.avgABS}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+
+        <!-- BOUTON RÉGÉNÉRER -->
+        <div class="flex gap-3 justify-center">
+          <button
+            type="button"
+            class="px-6 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors"
+            onclick="generateGroups()"
+          >
+            🔄 Régénérer les Groupes
+          </button>
+          <button
+            type="button"
+            class="px-6 py-2 bg-slate-400 text-white font-semibold rounded-lg hover:bg-slate-500 transition-colors"
+            onclick="toggleStatistics()"
+          >
+            ✕ Fermer Stats
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
   function toggleStatistics() {
     state.showStatistics = !state.showStatistics;
     updateUI();
@@ -1488,6 +1795,7 @@
     const finalizeTempBtn = qs('[data-action="finalize-temp-groups"]', state.modal);
     const exportPdfBtn = qs('[data-action="export-pdf"]', state.modal);
     const exportCsvBtn = qs('[data-action="export-csv"]', state.modal);
+    const snapshotsBtn = qs('[data-action="show-snapshots"]', state.modal);
 
     if (toggleStatsBtn) toggleStatsBtn.onclick = toggleStatistics;
     if (regenerateBtn) regenerateBtn.onclick = generateGroups;
@@ -1517,6 +1825,16 @@
     if (finalizeTempBtn) finalizeTempBtn.onclick = finalizeTempGroupsUI;
     if (exportPdfBtn) exportPdfBtn.onclick = exportToPDF;
     if (exportCsvBtn) exportCsvBtn.onclick = exportToCSV;
+    if (snapshotsBtn) {
+      snapshotsBtn.onclick = () => {
+        if (state.generatedGroups.length > 0) {
+          const groupName = `${getGroupPrefix()}${state.tempOffsetStart}`;
+          showSnapshotBrowser(groupName);
+        } else {
+          showToast('Aucun groupe généré. Finalisez d\'abord des groupes pour voir les snapshots.', 'info');
+        }
+      };
+    }
 
     // Initialiser Drag & Drop si on est à l'étape 5
     if (state.currentStep === 5 && state.generatedGroups.length > 0) {
@@ -1860,6 +2178,87 @@
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  //  SPRINT #1 : CHARGEMENT CONTINUATION (PropertiesService)
+  // ═══════════════════════════════════════════════════════════════
+
+  function loadContinuationIfNeeded() {
+    // Chargement unique des métadonnées de continuation
+    // Appelée une seule fois au démarrage step 1
+    if (!google?.script?.run) {
+      console.warn('[GroupsModule] google.script.run non disponible, skip continuation load');
+      return;
+    }
+
+    google.script.run
+      .withSuccessHandler((result) => {
+        if (!result?.success) {
+          console.log('[GroupsModule] ℹ️  Pas de continuation metadata trouvée');
+          return;
+        }
+
+        const metadata = result.metadata;
+        if (!metadata || !metadata.lastTempRange) {
+          console.log('[GroupsModule] ℹ️  Continuation metadata vide');
+          return;
+        }
+
+        // 🔄 Restaurer l'état de continuation depuis le serveur
+        state.lastTempRange = metadata.lastTempRange;
+        state.tempOffsetStart = metadata.tempOffsetStart;
+        state.persistMode = metadata.persistMode || false;
+
+        console.log('[GroupsModule] ✅ Continuation metadata restaurée!');
+        console.log('   lastTempRange:', state.lastTempRange);
+        console.log('   tempOffsetStart:', state.tempOffsetStart);
+        console.log('   persistMode:', state.persistMode);
+
+        // Montrer le dialog de continuation si applicable
+        if (state.lastTempRange && state.lastTempRange.count > 0) {
+          const continueChoice = confirm(
+            `📊 Vague précédente restaurée: ${state.lastTempRange.typePrefix}${state.lastTempRange.min} à ` +
+            `${state.lastTempRange.typePrefix}${state.lastTempRange.max} (${state.lastTempRange.count} groupes)\n\n` +
+            `Voulez-vous AJOUTER une nouvelle vague à cette série?\n\n` +
+            `[OK] Continuer la série (prochains numéros: ${state.tempOffsetStart}+)\n` +
+            `[Annuler] Recommencer une nouvelle série`
+          );
+
+          if (continueChoice) {
+            state.persistMode = true;
+            state.generatedGroups = [];
+            state.selectedClasses = [];
+            // groupType persiste
+            showToast(
+              `🔄 Continuation activée : prochains groupes ${state.tempOffsetStart}+`,
+              'success'
+            );
+          } else {
+            // Supprimer les métadonnées pour recommencer
+            google.script.run
+              .withSuccessHandler(() => {
+                console.log('[GroupsModule] Métadonnées de continuation supprimées');
+              })
+              .clearContinuationMetadata(state.groupType);
+
+            state.lastTempRange = null;
+            state.tempOffsetStart = 1;
+            state.persistMode = false;
+            showToast('🔄 Nouvelle série lancée', 'info');
+          }
+        }
+
+        updateUI();
+      })
+      .withFailureHandler((error) => {
+        console.error('[GroupsModule] Erreur lors du chargement continuation:', error);
+      })
+      .loadContinuationMetadata(state.groupType);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  CHARGEMENT DES ÉLÈVES
+  // ═══════════════════════════════════════════════════════════════
+
   function loadStudentsFromClasses() {
     console.log('[GroupsModule] ════════════════════════════════════════════');
     console.log('[GroupsModule] Chargement des élèves via classesData fusionnée...');
@@ -2030,6 +2429,92 @@
     });
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  //  SPRINT #2 : SCORE COMPOSITE & OPTIMISATION
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Calcule un score composite pour chaque élève
+   * Pondération : F(0.35) + M(0.35) + COM(0.15) + PART(0.15)
+   */
+  function getCompositeScore(student) {
+    const f = Number(student.scores?.F ?? student.scoreF ?? 0);
+    const m = Number(student.scores?.M ?? student.scoreM ?? 0);
+    const com = Number(student.com ?? 0);
+    const part = Number(student.part ?? 0);
+
+    // Normaliser COM et PART sur 0-20 si nécessaire (souvent 0-5)
+    const comNorm = com <= 5 ? com * 4 : com;  // 5 → 20 pts max
+    const partNorm = part <= 5 ? part * 4 : part;  // 5 → 20 pts max
+
+    // Score composite pondéré
+    return (f * 0.35) + (m * 0.35) + (comNorm * 0.15) + (partNorm * 0.15);
+  }
+
+  /**
+   * Calcule l'écart-type des scores composites par groupe
+   */
+  function calculateGroupScoreStdDev(groups) {
+    const groupAvgs = groups.map(g => {
+      if (g.students.length === 0) return 0;
+      const sum = g.students.reduce((s, stu) => s + getCompositeScore(stu), 0);
+      return sum / g.students.length;
+    });
+    const mean = groupAvgs.reduce((a, b) => a + b, 0) / groupAvgs.length;
+    const variance = groupAvgs.reduce((sum, avg) => sum + Math.pow(avg - mean, 2), 0) / groupAvgs.length;
+    return Math.sqrt(variance);
+  }
+
+  /**
+   * Optimise les groupes via échanges itératifs (local search)
+   * Essaie de minimiser l'écart-type des scores
+   */
+  function optimizeGroupsWithSwaps(groups, maxIterations = 50) {
+    let improved = true;
+    let iteration = 0;
+    let bestStdDev = calculateGroupScoreStdDev(groups);
+
+    console.log(`[GroupsModule] 🔄 Optimisation : écart-type initial = ${bestStdDev.toFixed(3)}`);
+
+    while (improved && iteration < maxIterations) {
+      improved = false;
+      iteration++;
+
+      // Essayer les échanges entre paires de groupes
+      for (let i = 0; i < groups.length && !improved; i++) {
+        for (let j = i + 1; j < groups.length && !improved; j++) {
+          // Essayer d'échanger un élève de groupe i avec un de groupe j
+          for (let ki = 0; ki < groups[i].students.length && !improved; ki++) {
+            for (let kj = 0; kj < groups[j].students.length && !improved; kj++) {
+              // Swap temporaire
+              const tempI = groups[i].students[ki];
+              const tempJ = groups[j].students[kj];
+
+              groups[i].students[ki] = tempJ;
+              groups[j].students[kj] = tempI;
+
+              // Calculer nouvel écart-type
+              const newStdDev = calculateGroupScoreStdDev(groups);
+
+              if (newStdDev < bestStdDev - 0.001) {
+                // Amélioration significative, garder le swap
+                bestStdDev = newStdDev;
+                improved = true;
+                console.log(`   ✅ Itération ${iteration}: swap G${i}-G${j} → σ=${newStdDev.toFixed(3)}`);
+              } else {
+                // Pas d'amélioration, remettre en place
+                groups[i].students[ki] = tempI;
+                groups[j].students[kj] = tempJ;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    console.log(`[GroupsModule] 🎯 Optimisation terminée en ${iteration} itérations. Écart-type final: ${bestStdDev.toFixed(3)}`);
+  }
+
   function generateGroupsLocally() {
     const num = state.numGroups || 3;
     if (!Array.isArray(state.students) || state.students.length === 0) {
@@ -2038,12 +2523,21 @@
       return;
     }
 
-    // 1. On trie par niveau (note haute -> élève "fort")
-    const sorted = sortByNeedScoreDesc(state.students);
-    console.log('[GroupsModule] 📊 Distribution par mode:', state.distributionType);
-    console.log('[GroupsModule] Top 3 élèves:', sorted.slice(0, 3).map(s => `${s.nom} (${getNeedScoreForStudent(s).toFixed(1)})`));
+    // 🆕 ÉTAPE 1 : Trier par score composite (au lieu de juste besoin académique)
+    const studentsWithScores = state.students.map(s => ({
+      ...s,
+      compositeScore: getCompositeScore(s)
+    }));
 
-    // 🔴 FIX PARITÉ : Entrelacers filles et garçons pour équilibrer
+    const sorted = studentsWithScores.sort((a, b) => b.compositeScore - a.compositeScore);
+
+    console.log('[GroupsModule] 📊 Distribution par mode:', state.distributionType);
+    console.log('[GroupsModule] 🎓 Score composite (F:0.35, M:0.35, COM:0.15, PART:0.15)');
+    console.log('[GroupsModule] Top 3 élèves:', sorted.slice(0, 3).map(s =>
+      `${s.nom} (composite: ${s.compositeScore.toFixed(1)})`
+    ));
+
+    // 🆕 ÉTAPE 2 : Équilibrer parité
     const girls = sorted.filter(s => (s.sexe || '').toUpperCase() === 'F');
     const boys = sorted.filter(s => (s.sexe || '').toUpperCase() === 'M');
     const other = sorted.filter(s => {
@@ -2060,35 +2554,30 @@
       if (i < girls.length) balanced.push(girls[i]);
       if (i < boys.length) balanced.push(boys[i]);
     }
-    // Ajouter les autres à la fin
     balanced.push(...other);
 
-    console.log('[GroupsModule] ✅ Liste équilibrée (F/M entrelacées): ' + balanced.length + ' élèves');
+    console.log('[GroupsModule] ✅ Liste équilibrée (F/M entrelacées, score composite): ' + balanced.length + ' élèves');
 
-    // 2. On prépare les groupes
+    // 🆕 ÉTAPE 3 : Créer groupes avec distribution intelligente
     const groups = Array.from({ length: num }, (_, idx) => ({
-      name: `Groupe ${idx + 1}`,
+      name: `Groupe ${state.tempOffsetStart + idx}`,
       students: []
     }));
 
     if (state.distributionType === 'homogeneous') {
-      // homogène = on prend le tri équilibré et on découpe en blocs séquentiels
+      // Homogène = blocs séquentiels
       const chunkSize = Math.ceil(balanced.length / num);
       for (let g = 0; g < num; g++) {
         const slice = balanced.slice(g * chunkSize, (g + 1) * chunkSize);
         groups[g].students.push(...slice);
       }
-      console.log('[GroupsModule] ✅ Distribution homogène (groupes de niveau + équilibre F/M)');
+      console.log('[GroupsModule] ✅ Distribution homogène (niveaux équilibrés)');
     } else {
-      // heterogeneous = on fait un snake draft sur la liste équilibrée :
-      // 1er tour: G1,G2,G3
-      // 2e tour: G3,G2,G1
-      // 3e tour: G1,G2,G3...
+      // Hétérogène = snake draft
       let forward = true;
       let index = 0;
       balanced.forEach(stu => {
         groups[index].students.push(stu);
-
         if (forward) {
           index++;
           if (index >= num) {
@@ -2103,18 +2592,23 @@
           }
         }
       });
-      console.log('[GroupsModule] ✅ Distribution hétérogène (équilibrée par niveau + F/M)');
+      console.log('[GroupsModule] ✅ Distribution hétérogène (snake draft)');
     }
+
+    // 🆕 ÉTAPE 4 : Optimiser avec échanges itératifs
+    optimizeGroupsWithSwaps(groups);
 
     state.generatedGroups = groups;
     state.lastGeneration = new Date();
 
-    // Log de vérification
+    // Log de vérification finale
     groups.forEach((g, idx) => {
       const avgScore = g.students.length > 0
-        ? (g.students.reduce((sum, s) => sum + getNeedScoreForStudent(s), 0) / g.students.length).toFixed(1)
+        ? (g.students.reduce((sum, s) => sum + getCompositeScore(s), 0) / g.students.length).toFixed(2)
         : 0;
-      console.log(`[GroupsModule] Groupe ${idx + 1}: ${g.students.length} élèves, niveau moyen: ${avgScore}`);
+      const girls = g.students.filter(s => (s.sexe || '').toUpperCase() === 'F').length;
+      const boys = g.students.length - girls;
+      console.log(`[GroupsModule] ${g.name}: ${g.students.length} élèves (${girls}F/${boys}M), score moyen: ${avgScore}`);
     });
   }
 
@@ -2354,6 +2848,26 @@
 
             console.log('[GroupsModule] Sauvegarde temp réussie:', result);
             console.log('[GroupsModule] Mémorisation:', state.lastTempRange);
+
+            // 🆕 SPRINT #1 : Sauvegarder metadata de continuation en PropertiesService
+            // Permet de reprendre après rechargement navigateur
+            google.script.run
+              .withSuccessHandler((resp) => {
+                if (resp.success) {
+                  console.log('[GroupsModule] ✅ Continuation metadata persistée');
+                  showToast('📊 Progression sauvegardée (continuation robuste)', 'info');
+                } else {
+                  console.warn('[GroupsModule] ⚠️ Persistence metadata échouée:', resp.error);
+                }
+              })
+              .withFailureHandler((err) => {
+                console.error('[GroupsModule] ❌ Erreur persistance:', err);
+              })
+              .saveContinuationMetadata(state.groupType, {
+                lastTempRange: state.lastTempRange,
+                tempOffsetStart: state.tempOffsetStart,
+                persistMode: state.persistMode
+              });
           } else {
             showToast(`Erreur: ${result.error}`, 'error');
           }
@@ -2463,6 +2977,158 @@
   // Alias pour compatibilité avec anciens appels
   function saveGroups() {
     saveTempGroupsUI();
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  🆕 SPRINT #4 : SNAPSHOT MANAGEMENT (Versioning)
+  // ═══════════════════════════════════════════════════════════════
+
+  function showSnapshotBrowser(groupName) {
+    if (!google?.script?.run) {
+      showToast('Google Apps Script non disponible', 'error');
+      return;
+    }
+
+    showToast(`📸 Chargement des versions de ${groupName}...`, 'info');
+
+    google.script.run
+      .withSuccessHandler((result) => {
+        if (result.success && result.snapshots && result.snapshots.length > 0) {
+          renderSnapshotDialog(groupName, result.snapshots);
+        } else {
+          showToast(`Aucune version pour ${groupName}`, 'info');
+        }
+      })
+      .withFailureHandler(error => {
+        showToast(`Erreur: ${error?.message || error}`, 'error');
+      })
+      .listGroupSnapshots(groupName);
+  }
+
+  function renderSnapshotDialog(groupName, snapshots) {
+    // Créer la modale des snapshots
+    const modal = documentRef.createElement('div');
+    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-[10000]';
+    modal.innerHTML = `
+      <div class="bg-white rounded-2xl shadow-2xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col">
+        <!-- En-tête -->
+        <div class="bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-8 py-6 rounded-t-2xl flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <i class="fas fa-history text-2xl"></i>
+            <div>
+              <h2 class="text-2xl font-bold">Historique des Versions</h2>
+              <p class="text-blue-100 text-sm">${groupName}</p>
+            </div>
+          </div>
+          <button class="text-white hover:bg-white/20 rounded-lg p-2 transition" onclick="this.closest('[data-modal]').remove()">
+            <i class="fas fa-times text-xl"></i>
+          </button>
+        </div>
+
+        <!-- Contenu -->
+        <div class="overflow-y-auto flex-1 px-8 py-6">
+          ${snapshots.length === 0 ? `
+            <div class="text-center py-8 text-gray-400">
+              <i class="fas fa-inbox text-4xl mb-3 block"></i>
+              <p>Aucune version disponible</p>
+            </div>
+          ` : `
+            <div class="space-y-3">
+              ${snapshots.map((snap, idx) => `
+                <div class="bg-gray-50 rounded-xl p-4 border border-gray-200 hover:border-blue-300 hover:shadow-md transition flex items-center justify-between">
+                  <div class="flex-1">
+                    <div class="font-semibold text-gray-800">${snap.name}</div>
+                    <div class="text-sm text-gray-500 flex items-center gap-4 mt-1">
+                      <span><i class="fas fa-calendar"></i> ${formatDate(snap.timestamp)}</span>
+                      <span><i class="fas fa-users"></i> ${snap.studentCount || 0} élèves</span>
+                    </div>
+                  </div>
+                  <div class="flex gap-2">
+                    <button
+                      class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition font-semibold text-sm"
+                      onclick="restoreSnapshotUI('${groupName}', '${snap.name}')"
+                    >
+                      <i class="fas fa-undo"></i> Restaurer
+                    </button>
+                    <button
+                      class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition font-semibold text-sm"
+                      onclick="deleteSnapshotUI('${snap.name}')"
+                    >
+                      <i class="fas fa-trash"></i> Supprimer
+                    </button>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          `}
+        </div>
+
+        <!-- Pied de page -->
+        <div class="bg-gray-50 border-t px-8 py-4 rounded-b-2xl flex justify-end gap-3">
+          <button
+            class="px-6 py-2 border border-gray-300 rounded-lg hover:bg-gray-100 transition font-semibold"
+            onclick="this.closest('[data-modal]').remove()"
+          >
+            Fermer
+          </button>
+        </div>
+      </div>
+    `;
+    modal.setAttribute('data-modal', 'snapshots');
+    modal.onclick = (e) => {
+      if (e.target === modal) modal.remove();
+    };
+    documentRef.body.appendChild(modal);
+  }
+
+  function restoreSnapshotUI(groupName, snapshotName) {
+    if (!confirm(`Êtes-vous sûr de vouloir restaurer ${snapshotName} ?\nCela remplacera le groupe "${groupName}" par cette version.`)) {
+      return;
+    }
+
+    showToast(`🔄 Restauration de ${snapshotName}...`, 'info');
+
+    google.script.run
+      .withSuccessHandler((result) => {
+        if (result.success) {
+          showToast(`✅ ${groupName} restauré depuis ${snapshotName}`, 'success');
+          // Fermer la modale
+          const modal = documentRef.querySelector('[data-modal="snapshots"]');
+          if (modal) modal.remove();
+          // Recharger les groupes
+          loadTempGroupsUI();
+        } else {
+          showToast(`Erreur: ${result.error}`, 'error');
+        }
+      })
+      .withFailureHandler(error => {
+        showToast(`Erreur de restauration: ${error?.message || error}`, 'error');
+      })
+      .restoreFromSnapshot(snapshotName);
+  }
+
+  function deleteSnapshotUI(snapshotName) {
+    if (!confirm(`Êtes-vous sûr de vouloir supprimer ${snapshotName} ?`)) {
+      return;
+    }
+
+    showToast(`🗑️ Suppression de ${snapshotName}...`, 'info');
+
+    google.script.run
+      .withSuccessHandler((result) => {
+        if (result.success) {
+          showToast(`✅ ${snapshotName} supprimé`, 'success');
+          // Rafraîchir la liste (en relançant le chargement)
+          const groupName = snapshotName.split('_snapshot_')[0];
+          showSnapshotBrowser(groupName);
+        } else {
+          showToast(`Erreur: ${result.error}`, 'error');
+        }
+      })
+      .withFailureHandler(error => {
+        showToast(`Erreur de suppression: ${error?.message || error}`, 'error');
+      })
+      .deleteSnapshot(snapshotName);
   }
 
   function exportToPDF() {
