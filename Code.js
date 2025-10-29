@@ -332,6 +332,163 @@ function exportAuditReport(groupName) {
   }
 }
 
+/**
+ * 🆕 GROUPINGS METADATA - PropertiesService storage/retrieval (SPRINT #6)
+ */
+
+function storeGroupingMetadata(groupType, groupingId, metadata) {
+  const ps = PropertiesService.getUserProperties();
+  const key = `GROUPING_${groupType}_${groupingId}`;
+  ps.setProperty(key, JSON.stringify(metadata));
+  console.log(`✅ Stored grouping metadata: ${key}`);
+}
+
+function loadGroupingMetadata(groupType, groupingId) {
+  const ps = PropertiesService.getUserProperties();
+  const key = `GROUPING_${groupType}_${groupingId}`;
+  const data = ps.getProperty(key);
+  return data ? JSON.parse(data) : null;
+}
+
+function getGroupingMetadataList(groupType) {
+  const ps = PropertiesService.getUserProperties();
+  const allProps = ps.getProperties();
+  const prefix = `GROUPING_${groupType}_`;
+  const result = {};
+
+  for (const key in allProps) {
+    if (key.startsWith(prefix)) {
+      const groupingId = key.substring(prefix.length);
+      result[groupingId] = JSON.parse(allProps[key]);
+    }
+  }
+  return result;
+}
+
+function deleteGroupingMetadata(groupType, groupingId) {
+  const ps = PropertiesService.getUserProperties();
+  const key = `GROUPING_${groupType}_${groupingId}`;
+  ps.deleteProperty(key);
+  console.log(`🗑️  Deleted grouping metadata: ${key}`);
+}
+
+/**
+ * Get next available offset for a specific grouping
+ * Scans sheets for pattern: typePrefix + groupingId + number + optional TEMP
+ * Example: if using "A" as groupingId: grBeA1, grBeA2, grBeA3TEMP → returns 4
+ * Or if no groupingId: grBe1, grBe2, grBe3 → returns 4
+ */
+function getNextOffsetForGrouping(typePrefix, groupingId) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = ss.getSheets();
+  let maxNum = 0;
+
+  for (const sheet of sheets) {
+    const name = sheet.getName();
+
+    // Pattern matching depends on whether groupingId is used
+    let pattern;
+    if (groupingId && groupingId !== 'default') {
+      // Pattern: grBe${groupingId}${number}(TEMP)?
+      // Example: grBeA1, grBeA2, grBeA3TEMP
+      pattern = new RegExp(`^${typePrefix}${groupingId}(\\d+)(TEMP)?$`);
+    } else {
+      // Pattern: grBe${number}(TEMP)?
+      // Example: grBe1, grBe2, grBe3TEMP
+      pattern = new RegExp(`^${typePrefix}(\\d+)(TEMP)?$`);
+    }
+
+    const match = name.match(pattern);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (num > maxNum) maxNum = num;
+    }
+  }
+
+  return maxNum + 1;
+}
+
+/**
+ * Get offset range (min-max) for a grouping
+ * Returns {min: X, max: Y, count: Z}
+ */
+function getGroupingOffsetRange(typePrefix, groupingId) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = ss.getSheets();
+  let minNum = null;
+  let maxNum = null;
+
+  for (const sheet of sheets) {
+    const name = sheet.getName();
+
+    let pattern;
+    if (groupingId && groupingId !== 'default') {
+      pattern = new RegExp(`^${typePrefix}${groupingId}(\\d+)(TEMP)?$`);
+    } else {
+      pattern = new RegExp(`^${typePrefix}(\\d+)(TEMP)?$`);
+    }
+
+    const match = name.match(pattern);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (minNum === null || num < minNum) minNum = num;
+      if (maxNum === null || num > maxNum) maxNum = num;
+    }
+  }
+
+  if (minNum === null || maxNum === null) {
+    return { min: null, max: null, count: 0 };
+  }
+
+  return {
+    min: minNum,
+    max: maxNum,
+    count: maxNum - minNum + 1
+  };
+}
+
+/**
+ * List all TEMP sheets for a grouping
+ */
+function listGroupingTempSheets(typePrefix, groupingId) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = ss.getSheets();
+  const result = [];
+
+  for (const sheet of sheets) {
+    const name = sheet.getName();
+
+    let pattern;
+    if (groupingId && groupingId !== 'default') {
+      pattern = new RegExp(`^${typePrefix}${groupingId}(\\d+)TEMP$`);
+    } else {
+      pattern = new RegExp(`^${typePrefix}(\\d+)TEMP$`);
+    }
+
+    if (name.match(pattern)) {
+      result.push(name);
+    }
+  }
+
+  return result.sort();
+}
+
+/**
+ * Delete all TEMP sheets for a grouping (used for cleanup/reset)
+ */
+function deleteGroupingTempSheets(typePrefix, groupingId) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const tempSheets = listGroupingTempSheets(typePrefix, groupingId);
+
+  for (const sheetName of tempSheets) {
+    const sheet = ss.getSheetByName(sheetName);
+    if (sheet) {
+      ss.deleteSheet(sheet);
+      console.log(`🗑️  Deleted TEMP sheet for grouping: ${sheetName}`);
+    }
+  }
+}
+
 /**************************** FONCTIONS LEGACY PIPELINE *********************************/
 
 /**

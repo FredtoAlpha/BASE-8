@@ -127,7 +127,31 @@
     persistMode: false,                 // Si true, ne pas réinitialiser les groupes au reset
 
     // 🆕 SPRINT #1 : Persistance
-    continuationLoaded: false           // Drapeau pour ne charger continuation qu'une fois
+    continuationLoaded: false,           // Drapeau pour ne charger continuation qu'une fois
+
+    // ═══════════════════════════════════════════════════════════════
+    // 🆕 GROUPINGS MODEL (Multi-pass support) - SPRINT #6
+    // ═══════════════════════════════════════════════════════════════
+
+    // Groupings registry: Array of {id, label, classes, groupCount, active, description}
+    groupings: [],
+
+    // Currently active grouping being edited/displayed
+    activeGroupingId: null,
+
+    // Per-grouping configuration (overrides global config)
+    // Format: { groupingId: { lv2Filter, distribution, offsetStart, ... } }
+    groupingConfig: {},
+
+    // Per-grouping generated groups (stores results per grouping)
+    // Format: { groupingId: [...groups] }
+    groupingGroups: {},
+
+    // Track if grouping mode is active
+    useGroupings: false,  // true if user has created multiple groupings, false for backward compat
+
+    // Grouping metadata from backend (for continuation mode)
+    groupingMetadata: {}  // { groupingId: { label, classes, groupCount, offsetStart, offsetEnd, status } }
   };
 
   // ═══════════════════════════════════════════════════════════════
@@ -184,6 +208,181 @@
       hour: '2-digit',
       minute: '2-digit'
     });
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // 🆕 GROUPINGS UTILITIES (SPRINT #6)
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Create a new grouping with unique ID
+   */
+  function createNewGrouping(label, classes, groupCount) {
+    const id = 'grp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    return {
+      id,
+      label: label || 'Regroupement ' + (state.groupings.length + 1),
+      classes: classes || [],
+      groupCount: groupCount || 3,
+      active: true,
+      description: ''
+    };
+  }
+
+  /**
+   * Get active grouping object
+   */
+  function getActiveGrouping() {
+    if (!state.activeGroupingId) return null;
+    return state.groupings.find(g => g.id === state.activeGroupingId);
+  }
+
+  /**
+   * Get active grouping ID (or implicit default if none)
+   */
+  function getEffectiveActiveGroupingId() {
+    if (state.useGroupings && state.activeGroupingId) {
+      return state.activeGroupingId;
+    }
+    return 'default';
+  }
+
+  /**
+   * Get classes for active grouping (or selected classes if no groupings)
+   */
+  function getEffectiveClasses() {
+    if (!state.useGroupings || !state.activeGroupingId) {
+      return state.selectedClasses;
+    }
+    const grouping = getActiveGrouping();
+    return grouping ? grouping.classes : state.selectedClasses;
+  }
+
+  /**
+   * Get group count for active grouping
+   */
+  function getEffectiveGroupCount() {
+    if (!state.useGroupings || !state.activeGroupingId) {
+      return state.numGroups;
+    }
+    const grouping = getActiveGrouping();
+    return grouping ? grouping.groupCount : state.numGroups;
+  }
+
+  /**
+   * Get effective groups array (per-grouping or global)
+   */
+  function getEffectiveGroups() {
+    if (!state.useGroupings || !state.activeGroupingId) {
+      return state.generatedGroups;
+    }
+    return state.groupingGroups[state.activeGroupingId] || [];
+  }
+
+  /**
+   * Set effective groups (per-grouping or global)
+   */
+  function setEffectiveGroups(groups) {
+    if (!state.useGroupings || !state.activeGroupingId) {
+      state.generatedGroups = groups;
+    } else {
+      state.groupingGroups[state.activeGroupingId] = groups;
+    }
+  }
+
+  /**
+   * Get config for active grouping (or global config if no groupings)
+   */
+  function getEffectiveConfig() {
+    if (!state.useGroupings || !state.activeGroupingId) {
+      return {
+        selectedSubject: state.selectedSubject,
+        distributionType: state.distributionType,
+        selectedLanguage: state.selectedLanguage
+      };
+    }
+    const groupingId = state.activeGroupingId;
+    return state.groupingConfig[groupingId] || {
+      selectedSubject: state.selectedSubject,
+      distributionType: state.distributionType,
+      selectedLanguage: state.selectedLanguage
+    };
+  }
+
+  /**
+   * Set config for active grouping
+   */
+  function setEffectiveConfig(config) {
+    if (!state.useGroupings || !state.activeGroupingId) {
+      state.selectedSubject = config.selectedSubject || state.selectedSubject;
+      state.distributionType = config.distributionType || state.distributionType;
+      state.selectedLanguage = config.selectedLanguage || state.selectedLanguage;
+    } else {
+      state.groupingConfig[state.activeGroupingId] = config;
+    }
+  }
+
+  /**
+   * Activate a grouping (switch view to that grouping)
+   */
+  function activateGrouping(groupingId) {
+    state.activeGroupingId = groupingId;
+    render(); // Re-render to show that grouping
+  }
+
+  /**
+   * Delete a grouping
+   */
+  function deleteGrouping(groupingId) {
+    state.groupings = state.groupings.filter(g => g.id !== groupingId);
+    delete state.groupingConfig[groupingId];
+    delete state.groupingGroups[groupingId];
+
+    // If we deleted the active one, switch to another
+    if (state.activeGroupingId === groupingId && state.groupings.length > 0) {
+      state.activeGroupingId = state.groupings[0].id;
+    } else if (state.groupings.length === 0) {
+      state.useGroupings = false;
+      state.activeGroupingId = null;
+    }
+  }
+
+  /**
+   * Toggle grouping active/inactive status
+   */
+  function toggleGroupingActive(groupingId) {
+    const grouping = state.groupings.find(g => g.id === groupingId);
+    if (grouping) {
+      grouping.active = !grouping.active;
+    }
+  }
+
+  /**
+   * Get list of active (enabled) groupings only
+   */
+  function getActiveGroupings() {
+    return state.groupings.filter(g => g.active);
+  }
+
+  /**
+   * Convert current state into a single implicit grouping
+   * (for backward compat when user doesn't use groupings)
+   */
+  function initializeSingleGrouping() {
+    if (state.groupings.length === 0 && state.useGroupings === false) {
+      // Create implicit single grouping from current selection
+      const grouping = {
+        id: 'default',
+        label: 'Défaut',
+        classes: state.selectedClasses,
+        groupCount: state.numGroups,
+        active: true,
+        description: 'Regroupement unique'
+      };
+      state.groupings = [grouping];
+      state.activeGroupingId = 'default';
+      state.useGroupings = false; // Still backward compat mode
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════
