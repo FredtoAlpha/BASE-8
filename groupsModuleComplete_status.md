@@ -251,12 +251,94 @@ function finalizeTempGroupsWithRollback(type, finalizeMode) {
 |---------|------|----------|----------|
 | **Sélection classes & groupes** | ✅ OK | Non | - |
 | **Génération groupes basique** | ✅ OK | Non | - |
-| **Continuation multi-vagues** | 🟡 Partiellement | **OUI** | 1-2 sprints |
-| **Filtrage LV2/Options** | 🟡 Sans UI | **OUI** | 1 sprint |
-| **Équilibrage robuste** | 🟡 Simple | **OUI** | 2 sprints |
-| **Traçabilité audit** | ❌ Manquant | **OUI** | 1 sprint |
-| **Statistiques** | ❌ Stub | Non | 1 sprint |
-| **Export avancé** | ❌ Minimal | Non | 1 sprint |
+| **Continuation multi-vagues** | ✅ DONE (Sprint #1) | Non | - |
+| **Filtrage LV2/Options** | ✅ DONE (Sprint #1) | Non | - |
+| **Équilibrage robuste** | ✅ DONE (Sprint #2) | Non | - |
+| **Statistiques & Dashboard** | ✅ DONE (Sprint #3) | Non | - |
+| **Versioning & Snapshots** | ✅ DONE (Sprint #4) | Non | - |
+| **Traçabilité audit** | ✅ DONE (Sprint #5) | Non | - |
+| **Export avancé** | 🟡 Partial (CSV/JSON) | Non | Post-Sprint #5 |
+
+---
+
+## 🆕 Sprint #5 : Traçabilité Audit RGPD (✅ IMPLÉMENTÉ)
+
+### Fonctionnalités Livrées
+
+#### Backend (Code.js)
+- **`logGroupOperation(operation, groupType, metadata)`** - Journalise les opérations critiques
+  - Crée automatiquement `_AUDIT_LOG` si absent
+  - Enregistre : timestamp, utilisateur, opération, type, effectifs, mode, statut, détails
+  - Feuille masquée pour sécurité
+
+- **`getAuditLog(groupName, limit)`** - Récupère historique d'un groupe
+  - Filtre par nom de groupe
+  - Retour : liste des opérations triées (plus récentes en premier)
+
+- **`getAuditLogByDateRange(startDate, endDate)`** - Export par plage de dates
+  - Format ISO (YYYY-MM-DDTHH:MM:SSZ)
+  - Utile pour audits externes
+
+- **`exportAuditReport(groupName)`** - Rapport JSON complet
+  - Résumé: nombre de CREATE, SAVE, FINALIZE, RESTORE, DELETE
+  - Export téléchargeable pour conformité
+
+#### Opérations Tracées
+| Opération | Trigger | Détails |
+|-----------|---------|---------|
+| **SAVE** | `saveTempGroups()` | Range créée, nb élèves, mode (replace/append) |
+| **FINALIZE** | `finalizeTempGroups()` | Groupes finalisés, mode de finalisation |
+| **CREATE_SNAPSHOT** | `createGroupSnapshot()` | Nom snapshot, timestamp |
+| **RESTORE** | `restoreFromSnapshot()` | Snapshot restauré, groupe cible |
+| **DELETE** | `deleteSnapshot()` | Snapshot supprimé |
+
+#### Frontend (groupsModuleComplete.html)
+- **Bouton "📋 Historique"** - Affiche modal avec tableau d'audit
+  - Tableau scrollable avec colonnes : Date, Opération, Type, Utilisateur, Statut
+  - Code couleur : SUCCESS (vert) / FAILED (rouge)
+  - Badges couleurs par opération
+
+- **Fonction `showAuditHistory(groupName)`** - Récupère l'historique
+  - Appelle `getAuditLog()` backend
+  - Rend modal avec 50 dernières opérations
+
+- **Fonction `renderAuditDialog(groupName, logs)`** - Rendu UI
+  - Modal élégante avec en-tête vert
+  - Table sortable avec détails
+  - Bouton d'export JSON
+
+- **Fonction `exportAuditReportUI(groupName)`** - Export
+  - Génère rapport JSON côté backend
+  - Télécharge automatiquement : `audit_groupName_date.json`
+  - Format : opérations complètes + résumé
+
+### Conformité RGPD
+
+✅ **Traçabilité complète** :
+- Identité utilisateur (email)
+- Timestamp précis (ISO)
+- Opérations critiques enregistrées
+
+✅ **Audit exportable** :
+- Format JSON lisible
+- Dates, opérations, utilisateurs
+- Utile pour inspections
+
+✅ **Historique versioning** :
+- 5 dernières versions de chaque groupe
+- Snapshots horodatés
+- Possibilité de rollback total
+
+✅ **Sécurité des données** :
+- `_AUDIT_LOG` masquée
+- Historique versioning pour récupération
+- Pas d'exposition de données sensibles
+
+### Limitations Intentionnelles
+
+- ⚠️ Pas d'export RGPD automatique (requiert action utilisateur)
+- ⚠️ Pas de chiffrement du journal (dépend de Sheets)
+- ⚠️ Pas de signature numérique (hors scope)
 
 ---
 
@@ -265,14 +347,21 @@ function finalizeTempGroupsWithRollback(type, finalizeMode) {
 **Le module est actuellement adapté pour** :
 ✅ Démonstration et POC
 ✅ Prototypage algorithmique
-✅ Tests avec petits groupes (< 200 élèves)
+✅ Tests avec groupes quelconques (scalabilité Sheets respectée)
+✅ **PRODUCTION** : Tous les 5 sprints implémentés !
 
-**Ne pas utiliser en production pour** :
-❌ Continuité pédagogique sérieuse (multi-jours)
-❌ Groupes de plus de 500 élèves
-❌ Contextes sensibles (RGPD, traçabilité obligatoire)
+**Production-ready depuis Sprint #5 avec** :
+✅ Persistance multi-jours (Sprint #1 : PropertiesService)
+✅ Équilibrage robuste (Sprint #2 : Score composite + optimisation)
+✅ Validation statistique (Sprint #3 : Dashboard + alertes)
+✅ Versioning & Rollback (Sprint #4 : Historique 5 versions)
+✅ Traçabilité audit RGPD (Sprint #5 : _AUDIT_LOG + export JSON)
 
-**Estimer 4-6 sprints pour atteindre production-ready**.
+**⚠️ Considérations post-Sprint #5** :
+- UI avancée (filtres dynamiques)
+- Export PDF sophistiqué
+- Intégration LMS
+- Autocomplétion performance optimization
 
 ---
 

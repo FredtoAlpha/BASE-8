@@ -135,6 +135,203 @@ function showSystemLogs() {
   );
 }
 
+/**************************** 🆕 AUDIT LOGGING SYSTEM *********************************/
+
+/**
+ * SPRINT #5: Socle de Journalisation Centralisée
+ * Traçabilité complète des opérations critiques
+ * Conforme RGPD avec historique versioning
+ */
+
+/**
+ * Journalise une opération critique du module groupes
+ * @param {string} operation - Type d'opération (CREATE, SAVE, FINALIZE, RESTORE, DELETE)
+ * @param {string} groupType - Type de groupes (needs, language, option)
+ * @param {object} metadata - Données contextuelles (groupName, count, mode, etc.)
+ */
+function logGroupOperation(operation, groupType, metadata = {}) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let auditSheet = ss.getSheetByName('_AUDIT_LOG');
+
+    // Créer _AUDIT_LOG si absent
+    if (!auditSheet) {
+      console.log('📋 Création de l\'onglet _AUDIT_LOG...');
+      auditSheet = ss.insertSheet('_AUDIT_LOG');
+      auditSheet.appendRow([
+        'Timestamp',
+        'Operation',
+        'GroupType',
+        'GroupName',
+        'StudentCount',
+        'Mode',
+        'User',
+        'Status',
+        'Details',
+        'SnapshotCreated'
+      ]);
+      auditSheet.setFrozenRows(1);
+      auditSheet.hideSheet();
+    }
+
+    // Construire la ligne d'audit
+    const timestamp = new Date().toISOString();
+    const user = Session.getActiveUser().getEmail() || 'UNKNOWN';
+    const groupName = metadata.groupName || '';
+    const studentCount = metadata.count || metadata.studentCount || 0;
+    const mode = metadata.mode || metadata.saveMode || '';
+    const status = metadata.status || 'SUCCESS';
+    const details = JSON.stringify(metadata.details || {});
+    const snapshotCreated = metadata.snapshotCreated || '';
+
+    // Ajouter la ligne
+    auditSheet.appendRow([
+      timestamp,
+      operation,
+      groupType,
+      groupName,
+      studentCount,
+      mode,
+      user,
+      status,
+      details,
+      snapshotCreated
+    ]);
+
+    console.log(`✅ Audit enregistré: ${operation} | ${groupType} | ${groupName} | ${user}`);
+
+    return { success: true, timestamp, operation, groupName };
+  } catch (e) {
+    console.error('❌ Erreur logGroupOperation:', e.toString());
+    return { success: false, error: e.toString() };
+  }
+}
+
+/**
+ * Récupère l'historique d'audit pour un groupe
+ * @param {string} groupName - Nom du groupe (ex: grBe1)
+ * @param {number} limit - Nombre de lignes à retourner
+ */
+function getAuditLog(groupName, limit = 50) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const auditSheet = ss.getSheetByName('_AUDIT_LOG');
+
+    if (!auditSheet) {
+      return { success: false, error: 'Aucun journal d\'audit trouvé', logs: [] };
+    }
+
+    const data = auditSheet.getDataRange().getValues();
+    const headers = data[0];
+
+    // Trouver l'index de la colonne GroupName
+    const groupNameIndex = headers.indexOf('GroupName');
+    if (groupNameIndex === -1) {
+      return { success: false, error: 'Colonne GroupName introuvable', logs: [] };
+    }
+
+    // Filtrer et formater
+    const logs = data
+      .slice(1)
+      .filter(row => row[groupNameIndex] === groupName)
+      .reverse()
+      .slice(0, limit)
+      .map((row, idx) => ({
+        index: idx + 1,
+        timestamp: row[headers.indexOf('Timestamp')],
+        operation: row[headers.indexOf('Operation')],
+        groupType: row[headers.indexOf('GroupType')],
+        studentCount: row[headers.indexOf('StudentCount')],
+        mode: row[headers.indexOf('Mode')],
+        user: row[headers.indexOf('User')],
+        status: row[headers.indexOf('Status')],
+        details: row[headers.indexOf('Details')],
+        snapshotCreated: row[headers.indexOf('SnapshotCreated')]
+      }));
+
+    return { success: true, groupName, logs, count: logs.length };
+  } catch (e) {
+    console.error('❌ Erreur getAuditLog:', e.toString());
+    return { success: false, error: e.toString(), logs: [] };
+  }
+}
+
+/**
+ * Récupère toutes les opérations d'audit sur une période
+ * @param {string} startDate - Date de début (ISO format)
+ * @param {string} endDate - Date de fin (ISO format)
+ */
+function getAuditLogByDateRange(startDate, endDate) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const auditSheet = ss.getSheetByName('_AUDIT_LOG');
+
+    if (!auditSheet) {
+      return { success: false, error: 'Aucun journal d\'audit trouvé', logs: [] };
+    }
+
+    const data = auditSheet.getDataRange().getValues();
+    const headers = data[0];
+    const timestampIndex = headers.indexOf('Timestamp');
+
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+
+    const logs = data
+      .slice(1)
+      .filter(row => {
+        const rowDate = new Date(row[timestampIndex]);
+        return rowDate >= start && rowDate <= end;
+      })
+      .map(row => ({
+        timestamp: row[timestampIndex],
+        operation: row[headers.indexOf('Operation')],
+        groupType: row[headers.indexOf('GroupType')],
+        groupName: row[headers.indexOf('GroupName')],
+        user: row[headers.indexOf('User')],
+        status: row[headers.indexOf('Status')]
+      }));
+
+    return { success: true, logs, count: logs.length };
+  } catch (e) {
+    console.error('❌ Erreur getAuditLogByDateRange:', e.toString());
+    return { success: false, error: e.toString(), logs: [] };
+  }
+}
+
+/**
+ * Génère un rapport d'audit au format JSON (pour export)
+ * @param {string} groupName - Groupe à auditer
+ */
+function exportAuditReport(groupName) {
+  try {
+    const auditData = getAuditLog(groupName, 100);
+    if (!auditData.success) {
+      return { success: false, error: auditData.error };
+    }
+
+    const report = {
+      title: `Rapport d'Audit - ${groupName}`,
+      generatedAt: new Date().toISOString(),
+      group: groupName,
+      totalOperations: auditData.count,
+      operations: auditData.logs,
+      summary: {
+        creates: auditData.logs.filter(l => l.operation === 'CREATE').length,
+        saves: auditData.logs.filter(l => l.operation === 'SAVE').length,
+        finalizes: auditData.logs.filter(l => l.operation === 'FINALIZE').length,
+        restores: auditData.logs.filter(l => l.operation === 'RESTORE').length,
+        deletes: auditData.logs.filter(l => l.operation === 'DELETE').length
+      }
+    };
+
+    return { success: true, report, json: JSON.stringify(report, null, 2) };
+  } catch (e) {
+    console.error('❌ Erreur exportAuditReport:', e.toString());
+    return { success: false, error: e.toString() };
+  }
+}
+
 /**************************** FONCTIONS LEGACY PIPELINE *********************************/
 
 /**
@@ -2496,6 +2693,19 @@ function saveTempGroups(payload) {
       payload.groups.length + ' groupe(s).'
     );
 
+    // 🆕 SPRINT #5: Journalisation de l'opération SAVE
+    var auditResult = logGroupOperation('SAVE', payload.type || 'unknown', {
+      groupName: typePrefix + startNum + '-' + (startNum + payload.groups.length - 1),
+      count: totalEleves,
+      mode: saveMode,
+      status: 'SUCCESS',
+      details: {
+        startNum: startNum,
+        endNum: startNum + payload.groups.length - 1,
+        groupsCount: payload.groups.length
+      }
+    });
+
     return {
       success: true,
       message: 'Groupes sauvegardés temporairement (numérotation continue)',
@@ -2505,11 +2715,17 @@ function saveTempGroups(payload) {
       totalGroups: payload.groups.length,
       totalEleves: totalEleves,
       results: results,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      auditLogged: auditResult.success
     };
 
   } catch (e) {
     console.error('Erreur saveTempGroups:', e.toString());
+    logGroupOperation('SAVE', payload.type || 'unknown', {
+      groupName: payload.type || 'unknown',
+      status: 'FAILED',
+      details: { error: e.toString() }
+    });
     return { success: false, error: e.toString() };
   }
 }
@@ -2850,16 +3066,34 @@ function finalizeTempGroups(type, finalizeMode) {
 
     console.log('finalizeTempGroups terminé - Groupes rendus visibles');
 
+    // 🆕 SPRINT #5: Journalisation de l'opération FINALIZE
+    var auditResult = logGroupOperation('FINALIZE', type, {
+      groupName: typePrefix + '1-N',
+      count: tempSheets.length,
+      mode: finalizeMode,
+      status: 'SUCCESS',
+      details: {
+        finalizeMode: finalizeMode,
+        groupsCount: tempSheets.length
+      }
+    });
+
     return {
       success: true,
       message: 'Groupes finalisés (' + finalizeMode + ' mode)',
       type: type,
       prefix: typePrefix,
       finalizeMode: finalizeMode,
-      count: tempSheets.length
+      count: tempSheets.length,
+      auditLogged: auditResult.success
     };
   } catch (e) {
     console.error('Erreur finalizeTempGroups:', e.toString());
+    logGroupOperation('FINALIZE', type, {
+      groupName: typePrefix,
+      status: 'FAILED',
+      details: { error: e.toString() }
+    });
     return { success: false, error: e.toString() };
   }
 }
@@ -3030,6 +3264,17 @@ function createGroupSnapshot(groupName) {
       });
     }
 
+    // 🆕 SPRINT #5: Journaliser la création du snapshot
+    logGroupOperation('CREATE_SNAPSHOT', 'snapshot', {
+      groupName: groupName,
+      snapshotCreated: snapshotName,
+      status: 'SUCCESS',
+      details: {
+        snapshotName: snapshotName,
+        timestamp: timestamp
+      }
+    });
+
     return {
       success: true,
       message: `Snapshot créé pour ${groupName}`,
@@ -3039,6 +3284,11 @@ function createGroupSnapshot(groupName) {
     };
   } catch (e) {
     console.error('❌ Erreur createGroupSnapshot:', e.toString());
+    logGroupOperation('CREATE_SNAPSHOT', 'snapshot', {
+      groupName: groupName,
+      status: 'FAILED',
+      details: { error: e.toString() }
+    });
     return { success: false, error: e.toString() };
   }
 }
@@ -3121,6 +3371,17 @@ function restoreFromSnapshot(snapshotName) {
 
     console.log(`✅ Groupe restauré depuis ${snapshotName} → ${originalGroupName}`);
 
+    // 🆕 SPRINT #5: Journaliser la restauration du snapshot
+    logGroupOperation('RESTORE', 'snapshot', {
+      groupName: originalGroupName,
+      snapshotCreated: snapshotName,
+      status: 'SUCCESS',
+      details: {
+        snapshotName: snapshotName,
+        restoredGroup: originalGroupName
+      }
+    });
+
     return {
       success: true,
       message: `Groupe "${originalGroupName}" restauré depuis ${snapshotName}`,
@@ -3130,6 +3391,11 @@ function restoreFromSnapshot(snapshotName) {
     };
   } catch (e) {
     console.error('❌ Erreur restoreFromSnapshot:', e.toString());
+    logGroupOperation('RESTORE', 'snapshot', {
+      groupName: snapshotName,
+      status: 'FAILED',
+      details: { error: e.toString() }
+    });
     return { success: false, error: e.toString() };
   }
 }

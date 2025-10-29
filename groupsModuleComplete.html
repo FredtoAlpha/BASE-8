@@ -1099,6 +1099,10 @@
                 <i class="fas fa-history"></i>
                 📸 Snapshots
               </button>
+              <button type="button" class="action-btn bg-cyan-100 hover:bg-cyan-200 text-cyan-700" data-action="show-audit-history" title="Voir l'historique complet des opérations d'audit">
+                <i class="fas fa-list"></i>
+                📋 Historique
+              </button>
               <button type="button" class="action-btn bg-orange-600 hover:bg-orange-700 text-white" data-action="save-temp-groups" title="Sauvegarder les groupes en version temporaire (cachée)">
                 <i class="fas fa-save"></i>
                 💾 Temp
@@ -1796,6 +1800,7 @@
     const exportPdfBtn = qs('[data-action="export-pdf"]', state.modal);
     const exportCsvBtn = qs('[data-action="export-csv"]', state.modal);
     const snapshotsBtn = qs('[data-action="show-snapshots"]', state.modal);
+    const auditHistoryBtn = qs('[data-action="show-audit-history"]', state.modal);
 
     if (toggleStatsBtn) toggleStatsBtn.onclick = toggleStatistics;
     if (regenerateBtn) regenerateBtn.onclick = generateGroups;
@@ -1832,6 +1837,16 @@
           showSnapshotBrowser(groupName);
         } else {
           showToast('Aucun groupe généré. Finalisez d\'abord des groupes pour voir les snapshots.', 'info');
+        }
+      };
+    }
+    if (auditHistoryBtn) {
+      auditHistoryBtn.onclick = () => {
+        if (state.generatedGroups.length > 0) {
+          const groupName = `${getGroupPrefix()}${state.tempOffsetStart}`;
+          showAuditHistory(groupName);
+        } else {
+          showToast('Aucun groupe généré. Finalisez d\'abord des groupes pour voir l\'historique.', 'info');
         }
       };
     }
@@ -3129,6 +3144,159 @@
         showToast(`Erreur de suppression: ${error?.message || error}`, 'error');
       })
       .deleteSnapshot(snapshotName);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  🆕 SPRINT #5 : AUDIT LOGGING & HISTORIQUE
+  // ═══════════════════════════════════════════════════════════════
+
+  function showAuditHistory(groupName) {
+    if (!google?.script?.run) {
+      showToast('Google Apps Script non disponible', 'error');
+      return;
+    }
+
+    showToast(`📋 Chargement de l'historique pour ${groupName}...`, 'info');
+
+    google.script.run
+      .withSuccessHandler((result) => {
+        if (result.success && result.logs && result.logs.length > 0) {
+          renderAuditDialog(groupName, result.logs);
+        } else {
+          showToast(`Aucun historique pour ${groupName}`, 'info');
+        }
+      })
+      .withFailureHandler(error => {
+        showToast(`Erreur: ${error?.message || error}`, 'error');
+      })
+      .getAuditLog(groupName, 50);
+  }
+
+  function renderAuditDialog(groupName, logs) {
+    const modal = documentRef.createElement('div');
+    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-[10000]';
+    modal.innerHTML = `
+      <div class="bg-white rounded-2xl shadow-2xl max-w-4xl w-full mx-4 max-h-[80vh] flex flex-col">
+        <!-- En-tête -->
+        <div class="bg-gradient-to-r from-green-600 to-emerald-600 text-white px-8 py-6 rounded-t-2xl flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <i class="fas fa-history text-2xl"></i>
+            <div>
+              <h2 class="text-2xl font-bold">Historique d'Audit</h2>
+              <p class="text-green-100 text-sm">${groupName}</p>
+            </div>
+          </div>
+          <button class="text-white hover:bg-white/20 rounded-lg p-2 transition" onclick="this.closest('[data-modal]').remove()">
+            <i class="fas fa-times text-xl"></i>
+          </button>
+        </div>
+
+        <!-- Contenu -->
+        <div class="overflow-y-auto flex-1 px-8 py-6">
+          ${logs.length === 0 ? `
+            <div class="text-center py-8 text-gray-400">
+              <i class="fas fa-inbox text-4xl mb-3 block"></i>
+              <p>Aucun historique d'audit</p>
+            </div>
+          ` : `
+            <div class="space-y-2">
+              <table class="w-full border-collapse text-sm">
+                <thead>
+                  <tr class="bg-gray-100 border-b-2 border-gray-300">
+                    <th class="px-3 py-2 text-left font-semibold">#</th>
+                    <th class="px-3 py-2 text-left font-semibold">Date/Heure</th>
+                    <th class="px-3 py-2 text-left font-semibold">Opération</th>
+                    <th class="px-3 py-2 text-left font-semibold">Type</th>
+                    <th class="px-3 py-2 text-left font-semibold">Utilisateur</th>
+                    <th class="px-3 py-2 text-left font-semibold">Statut</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${logs.map((log, idx) => `
+                    <tr class="border-b border-gray-200 hover:bg-gray-50">
+                      <td class="px-3 py-2 text-gray-600">${log.index}</td>
+                      <td class="px-3 py-2 text-gray-700 text-xs">${formatDate(log.timestamp)}</td>
+                      <td class="px-3 py-2">
+                        <span class="px-2 py-1 rounded text-xs font-semibold ${getOperationBadgeClass(log.operation)}">
+                          ${log.operation}
+                        </span>
+                      </td>
+                      <td class="px-3 py-2 text-gray-700 text-xs">${log.groupType}</td>
+                      <td class="px-3 py-2 text-gray-700 text-xs">${log.user}</td>
+                      <td class="px-3 py-2">
+                        <span class="px-2 py-1 rounded text-xs font-semibold ${log.status === 'SUCCESS' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">
+                          ${log.status}
+                        </span>
+                      </td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          `}
+        </div>
+
+        <!-- Pied de page -->
+        <div class="bg-gray-50 border-t px-8 py-4 rounded-b-2xl flex justify-between gap-3">
+          <button
+            class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition font-semibold text-sm"
+            onclick="exportAuditReportUI('${groupName}')"
+          >
+            <i class="fas fa-download"></i> Exporter JSON
+          </button>
+          <button
+            class="px-6 py-2 border border-gray-300 rounded-lg hover:bg-gray-100 transition font-semibold"
+            onclick="this.closest('[data-modal]').remove()"
+          >
+            Fermer
+          </button>
+        </div>
+      </div>
+    `;
+    modal.setAttribute('data-modal', 'audit');
+    modal.onclick = (e) => {
+      if (e.target === modal) modal.remove();
+    };
+    documentRef.body.appendChild(modal);
+  }
+
+  function getOperationBadgeClass(operation) {
+    const classes = {
+      'SAVE': 'bg-blue-100 text-blue-700',
+      'FINALIZE': 'bg-green-100 text-green-700',
+      'RESTORE': 'bg-orange-100 text-orange-700',
+      'CREATE_SNAPSHOT': 'bg-purple-100 text-purple-700',
+      'DELETE': 'bg-red-100 text-red-700'
+    };
+    return classes[operation] || 'bg-gray-100 text-gray-700';
+  }
+
+  function exportAuditReportUI(groupName) {
+    showToast(`📥 Génération du rapport d'audit pour ${groupName}...`, 'info');
+
+    google.script.run
+      .withSuccessHandler((result) => {
+        if (result.success && result.json) {
+          // Télécharger comme fichier JSON
+          const blob = new Blob([result.json], { type: 'application/json;charset=utf-8;' });
+          const url = URL.createObjectURL(blob);
+          const link = documentRef.createElement('a');
+          link.href = url;
+          link.download = `audit_${groupName}_${new Date().toISOString().split('T')[0]}.json`;
+          documentRef.body.appendChild(link);
+          link.click();
+          documentRef.body.removeChild(link);
+          URL.revokeObjectURL(url);
+
+          showToast(`✅ Rapport d'audit exporté: ${link.download}`, 'success');
+        } else {
+          showToast(`Erreur: ${result.error}`, 'error');
+        }
+      })
+      .withFailureHandler(error => {
+        showToast(`Erreur d'export: ${error?.message || error}`, 'error');
+      })
+      .exportAuditReport(groupName);
   }
 
   function exportToPDF() {
