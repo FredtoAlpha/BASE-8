@@ -2158,6 +2158,66 @@ function saveGroupsToSheets(payload) {
   }
 }
 
+function getGroupTypePrefix_(type) {
+  if (type === 'needs') return 'grBe';
+  if (type === 'language') return 'grLv';
+  return 'grOp';
+}
+
+function getContinuationStore_() {
+  return PropertiesService.getDocumentProperties();
+}
+
+function getContinuationKey_(prefix) {
+  return `GROUPS_CONTINUATION_${prefix}`;
+}
+
+function loadContinuationMetadata_(prefix) {
+  try {
+    const key = getContinuationKey_(prefix);
+    const raw = getContinuationStore_().getProperty(key);
+    if (!raw) {
+      return null;
+    }
+    return JSON.parse(raw);
+  } catch (error) {
+    console.warn('⚠️ loadContinuationMetadata_ error:', error);
+    return null;
+  }
+}
+
+function saveContinuationMetadata_(prefix, metadata) {
+  try {
+    const key = getContinuationKey_(prefix);
+    if (!metadata) {
+      getContinuationStore_().deleteProperty(key);
+      return;
+    }
+    getContinuationStore_().setProperty(key, JSON.stringify(metadata));
+  } catch (error) {
+    console.warn('⚠️ saveContinuationMetadata_ error:', error);
+  }
+}
+
+function computeSuggestedOffset_(metadata, fallback) {
+  const lastTemp = metadata?.lastTempIndex || 0;
+  const lastFinal = metadata?.lastFinalIndex || 0;
+  const highest = Math.max(lastTemp, lastFinal, 0);
+  if (highest > 0) {
+    return highest + 1;
+  }
+  return fallback || 1;
+}
+
+function extractGroupIndex_(sheetName, prefix) {
+  const regex = new RegExp('^' + prefix + '(\\d+)(TEMP)?$');
+  const match = sheetName.match(regex);
+  if (!match) {
+    return null;
+  }
+  return parseInt(match[1], 10);
+}
+
 /**
  * Sauvegarde les groupes générés dans des onglets TEMPORAIRES (cachés)
  * Préfixes : grBe (Besoin), grLv (Langue), grOp (Options)
@@ -2171,13 +2231,7 @@ function saveTempGroups(payload) {
       return { success: false, error: 'Payload invalide ou groups manquants' };
     }
 
-    // Déterminer le prefix selon le type
-    let typePrefix = 'grOp'; // défaut
-    if (payload.type === 'needs') {
-      typePrefix = 'grBe'; // Besoin = Be
-    } else if (payload.type === 'language') {
-      typePrefix = 'grLv'; // Langue = Lv
-    }
+    const typePrefix = getGroupTypePrefix_(payload.type);
 
     console.log('📋 saveTempGroups - Début de sauvegarde temporaire');
     console.log('   Type: ' + payload.type);
@@ -2188,7 +2242,50 @@ function saveTempGroups(payload) {
     const results = [];
     let totalEleves = 0;
 
-    // Sauvegarder chaque groupe avec suffix TEMP
+    const persistMode = payload.persistMode === 'continue' ? 'continue' : 'replace';
+    const metadataBefore = loadContinuationMetadata_(typePrefix) || {};
+    const requestedOffset = Number(payload.offsetStart);
+    let offsetStart = Number.isFinite(requestedOffset) && requestedOffset > 0
+      ? requestedOffset
+      : (persistMode === 'continue'
+          ? computeSuggestedOffset_(metadataBefore)
+          : 1);
+
+    const sheets = ss.getSheets();
+    const tempSheets = sheets.filter(sh => sh.getName().startsWith(typePrefix) && sh.getName().endsWith('TEMP'));
+
+    if (persistMode === 'replace') {
+      tempSheets.forEach(sh => ss.deleteSheet(sh));
+      offsetStart = Math.max(1, offsetStart);
+    } else {
+      const finalSheets = sheets.filter(sh => sh.getName().startsWith(typePrefix) && !sh.getName().endsWith('TEMP'));
+      const maxTemp = tempSheets.reduce((max, sh) => {
+        const idx = extractGroupIndex_(sh.getName(), typePrefix);
+        return typeof idx === 'number' ? Math.max(max, idx) : max;
+      }, 0);
+      const maxFinal = finalSheets.reduce((max, sh) => {
+        const idx = extractGroupIndex_(sh.getName(), typePrefix);
+        return typeof idx === 'number' ? Math.max(max, idx) : max;
+      }, 0);
+      const highestExisting = Math.max(
+        maxTemp,
+        maxFinal,
+        metadataBefore.lastTempIndex || 0,
+        metadataBefore.lastFinalIndex || 0
+      );
+
+      tempSheets.forEach(sh => {
+        const idx = extractGroupIndex_(sh.getName(), typePrefix);
+        if (typeof idx === 'number' && idx >= offsetStart) {
+          ss.deleteSheet(sh);
+        }
+      });
+
+      if (offsetStart <= highestExisting) {
+        offsetStart = highestExisting + 1;
+      }
+    }
+
     for (let idx = 0; idx < payload.groups.length; idx++) {
       const group = payload.groups[idx];
 
@@ -2197,7 +2294,8 @@ function saveTempGroups(payload) {
         return { success: false, error: 'Groupe ' + idx + ' invalide' };
       }
 
-      const tempGroupName = typePrefix + (idx + 1) + 'TEMP';
+      const currentIndex = offsetStart + idx;
+      const tempGroupName = typePrefix + currentIndex + 'TEMP';
       const studentsData = group.students;
 
       console.log('   👥 ' + tempGroupName + ': ' + studentsData.length + ' élèves');
@@ -2211,11 +2309,15 @@ function saveTempGroups(payload) {
         });
       }
 
-      // Appeler saveGroup avec le nom TEMP et les données complètes
-      const result = saveGroup(tempGroupName, studentsData, { isFullData: true });
+      const existing = ss.getSheetByName(tempGroupName);
+      if (existing) {
+        console.log('   ♻️ Suppression feuille TEMP existante avant écriture: ' + tempGroupName);
+        ss.deleteSheet(existing);
+      }
+
+      const result = saveGroup(tempGroupName, studentsData, { isFullData: true, index: currentIndex });
       console.log('      📊 Résultat saveGroup:', result);
 
-      // 🔴 BUG FIX : Si saveGroup échoue, ARRÊTER IMMÉDIATEMENT et signaler l'erreur
       if (!result.success) {
         console.error('❌ ERREUR CRITIQUE : saveGroup a échoué pour ' + tempGroupName);
         console.error('   Raison:', result.error);
@@ -2227,22 +2329,42 @@ function saveTempGroups(payload) {
 
       results.push({
         tempGroupName: tempGroupName,
+        index: currentIndex,
         ...result
       });
 
       totalEleves += studentsData.length;
     }
 
-    // Cacher les onglets TEMP
-    const sheets = ss.getSheets();
-    sheets.forEach(sh => {
-      if (sh.getName().endsWith('TEMP')) {
+    results.forEach(res => {
+      const sh = ss.getSheetByName(res.tempGroupName);
+      if (sh) {
         sh.hideSheet();
-        console.log('   👁️ Masqué: ' + sh.getName());
       }
     });
 
     console.log('✅ saveTempGroups terminé - ' + totalEleves + ' élèves au total');
+
+    const createdIndexes = results.map(res => res.index).filter(idx => typeof idx === 'number');
+    const offsetEnd = createdIndexes.length > 0 ? Math.max.apply(null, createdIndexes) : offsetStart + payload.groups.length - 1;
+    const createdRange = createdIndexes.length > 0
+      ? { start: Math.min.apply(null, createdIndexes), end: offsetEnd }
+      : null;
+
+    const nowIso = new Date().toISOString();
+    const updatedMetadata = {
+      ...metadataBefore,
+      lastTempIndex: Math.max(metadataBefore.lastTempIndex || 0, offsetEnd || 0),
+      lastTempRange: createdRange,
+      lastPersistMode: persistMode,
+      lastUpdated: nowIso,
+      lastTempUpdated: nowIso,
+      lastConfig: payload.config || {},
+      lastRegroupementId: payload?.regroupement?.id || metadataBefore.lastRegroupementId || '',
+      lastRegroupementLabel: payload?.regroupement?.label || metadataBefore.lastRegroupementLabel || ''
+    };
+
+    saveContinuationMetadata_(typePrefix, updatedMetadata);
 
     return {
       success: true,
@@ -2251,7 +2373,12 @@ function saveTempGroups(payload) {
       totalGroups: payload.groups.length,
       totalEleves: totalEleves,
       results: results,
-      timestamp: new Date().toISOString()
+      timestamp: nowIso,
+      offsetStart: offsetStart,
+      offsetEnd: offsetEnd,
+      persistMode: persistMode,
+      createdRange: createdRange,
+      nextOffset: computeSuggestedOffset_(updatedMetadata)
     };
   } catch (e) {
     console.error('❌ Erreur saveTempGroups:', e.toString());
@@ -2309,6 +2436,33 @@ function getTempGroupsInfo() {
   }
 }
 
+function getGroupContinuationStatus(type) {
+  try {
+    if (!type || !['needs', 'language', 'options'].includes(type)) {
+      return { success: false, error: 'Type invalide' };
+    }
+
+    const typePrefix = getGroupTypePrefix_(type);
+    const metadata = loadContinuationMetadata_(typePrefix) || {};
+    const suggestedNextIndex = computeSuggestedOffset_(metadata);
+
+    return {
+      success: true,
+      type: type,
+      prefix: typePrefix,
+      metadata: {
+        ...metadata,
+        suggestedNextIndex: suggestedNextIndex,
+        hasTempRange: !!metadata.lastTempRange,
+        hasFinalRange: !!metadata.lastFinalRange
+      }
+    };
+  } catch (e) {
+    console.error('❌ Erreur getGroupContinuationStatus:', e.toString());
+    return { success: false, error: e.toString() };
+  }
+}
+
 /**
  * Charge les groupes temporaires et les retourne pour recharger dans l'interface
  * Retourne les élèves de grBe1TEMP, grBe2TEMP, etc.
@@ -2319,43 +2473,35 @@ function loadTempGroups(type) {
       return { success: false, error: 'Type invalide' };
     }
 
-    let typePrefix = 'grOp';
-    if (type === 'needs') typePrefix = 'grBe';
-    else if (type === 'language') typePrefix = 'grLv';
-
+    const typePrefix = getGroupTypePrefix_(type);
     console.log('📥 loadTempGroups pour type: ' + type + ' (prefix: ' + typePrefix + ')');
 
     const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const sheets = ss.getSheets().filter(sh => sh.getName().startsWith(typePrefix) && sh.getName().endsWith('TEMP'));
+    const tempSheets = ss.getSheets().filter(sh => sh.getName().startsWith(typePrefix) && sh.getName().endsWith('TEMP'));
+
+    tempSheets.sort((a, b) => {
+      const idxA = extractGroupIndex_(a.getName(), typePrefix) || 0;
+      const idxB = extractGroupIndex_(b.getName(), typePrefix) || 0;
+      return idxA - idxB;
+    });
 
     const groups = [];
 
-    sheets.sort((a, b) => {
-      const numA = parseInt(a.getName().match(/\d+/)[0]);
-      const numB = parseInt(b.getName().match(/\d+/)[0]);
-      return numA - numB;
-    });
-
-    sheets.forEach((sh, idx) => {
+    tempSheets.forEach(sh => {
       const data = sh.getDataRange().getValues();
       if (data.length < 2) return;
 
       const header = data[0].map(h => String(h).toUpperCase().trim());
-      const idCol = header.indexOf('ID_ELEVE') !== -1 ? header.indexOf('ID_ELEVE') :
-                    header.indexOf('ID') !== -1 ? header.indexOf('ID') : 0;
-
       const students = [];
       for (let i = 1; i < data.length; i++) {
         const row = data[i];
-        if (!row[0]) continue;
+        if (!row.some(cell => cell !== '' && cell !== null)) continue;
 
-        // Reconstruire l'élève avec tous les champs disponibles
         const student = {};
         header.forEach((col, colIdx) => {
           student[col] = row[colIdx] || '';
         });
 
-        // Ajouter aussi en minuscules pour compatibilité
         if (!student.id && student.ID_ELEVE) student.id = student.ID_ELEVE;
         if (!student.nom && student.NOM) student.nom = student.NOM;
         if (!student.prenom && student.PRENOM) student.prenom = student.PRENOM;
@@ -2366,8 +2512,10 @@ function loadTempGroups(type) {
       }
 
       if (students.length > 0) {
+        const index = extractGroupIndex_(sh.getName(), typePrefix) || groups.length + 1;
         groups.push({
-          name: 'Groupe ' + (idx + 1),
+          name: 'Groupe ' + index,
+          index: index,
           students: students,
           count: students.length
         });
@@ -2376,13 +2524,20 @@ function loadTempGroups(type) {
       }
     });
 
+    const indexes = groups.map(g => g.index).filter(idx => typeof idx === 'number');
+    const offsetStart = indexes.length > 0 ? Math.min.apply(null, indexes) : null;
+    const offsetEnd = indexes.length > 0 ? Math.max.apply(null, indexes) : null;
+
     console.log('✅ loadTempGroups - ' + groups.length + ' groupes chargés');
 
     return {
       success: true,
       groups: groups,
       totalGroups: groups.length,
-      type: type
+      type: type,
+      offsetStart: offsetStart,
+      offsetEnd: offsetEnd,
+      range: indexes.length > 0 ? { start: offsetStart, end: offsetEnd } : null
     };
   } catch (e) {
     console.error('❌ Erreur loadTempGroups:', e.toString());
@@ -2394,59 +2549,104 @@ function loadTempGroups(type) {
  * Finalise les groupes temporaires en les renommant et les rendant visibles
  * Renomme grBe1TEMP → grBe1, supprime les TEMP
  */
-function finalizeTempGroups(type) {
+function finalizeTempGroups(request) {
   try {
+    let type = request;
+    let metadata = {};
+    let persistMode = 'replace';
+    let regroupementInfo = {};
+
+    if (typeof request === 'object' && request !== null) {
+      type = request.type;
+      metadata = request.metadata || request.config || {};
+      persistMode = request.persistMode === 'continue' ? 'continue' : 'replace';
+      regroupementInfo = request.regroupement || {};
+    }
+
     if (!type || !['needs', 'language', 'options'].includes(type)) {
       return { success: false, error: 'Type invalide' };
     }
 
-    let typePrefix = 'grOp';
-    if (type === 'needs') typePrefix = 'grBe';
-    else if (type === 'language') typePrefix = 'grLv';
-
-    console.log('✅ finalizeTempGroups pour type: ' + type + ' (prefix: ' + typePrefix + ')');
+    const typePrefix = getGroupTypePrefix_(type);
+    console.log('✅ finalizeTempGroups pour type: ' + type + ' (prefix: ' + typePrefix + ') - mode ' + persistMode);
 
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sheets = ss.getSheets();
-
-    // Trouver tous les onglets TEMP pour ce prefix
     const tempSheets = sheets.filter(sh => sh.getName().startsWith(typePrefix) && sh.getName().endsWith('TEMP'));
 
     if (tempSheets.length === 0) {
       return { success: false, error: 'Aucun groupe temporaire trouvé pour ' + typePrefix };
     }
 
-    console.log('   Finalisation de ' + tempSheets.length + ' groupes...');
-
-    // D'abord, supprimer les anciens groupes finalisés du même type
-    const finalSheets = sheets.filter(sh => {
-      const name = sh.getName();
-      return name.startsWith(typePrefix) && !name.endsWith('TEMP') && /^\w+\d+$/.test(name);
+    tempSheets.sort((a, b) => {
+      const idxA = extractGroupIndex_(a.getName(), typePrefix) || 0;
+      const idxB = extractGroupIndex_(b.getName(), typePrefix) || 0;
+      return idxA - idxB;
     });
 
-    finalSheets.forEach(sh => {
-      console.log('   🗑️ Suppression de l\'ancien:', sh.getName());
-      ss.deleteSheet(sh);
-    });
+    const metadataBefore = loadContinuationMetadata_(typePrefix) || {};
 
-    // Renommer les TEMP en final + afficher
+    if (persistMode === 'replace') {
+      const finalSheets = sheets.filter(sh => sh.getName().startsWith(typePrefix) && !sh.getName().endsWith('TEMP'));
+      finalSheets.forEach(sh => {
+        console.log('   🗑️ Suppression de l\'ancien: ' + sh.getName());
+        ss.deleteSheet(sh);
+      });
+    }
+
+    const renamedIndexes = [];
+
     tempSheets.forEach(sh => {
       const tempName = sh.getName();
-      const finalName = tempName.replace('TEMP', ''); // grBe1TEMP → grBe1
+      const finalName = tempName.replace('TEMP', '');
+      const index = extractGroupIndex_(tempName, typePrefix);
+
+      if (persistMode === 'continue') {
+        const existing = ss.getSheetByName(finalName);
+        if (existing) {
+          console.log('   ♻️ Remplacement du groupe existant: ' + finalName);
+          ss.deleteSheet(existing);
+        }
+      }
 
       console.log('   📝 Renommage: ' + tempName + ' → ' + finalName);
       sh.setName(finalName);
       sh.showSheet();
+
+      if (typeof index === 'number') {
+        renamedIndexes.push(index);
+      }
     });
 
     console.log('✅ finalizeTempGroups terminé - Groupes rendus visibles');
+
+    const nowIso = new Date().toISOString();
+    const updatedMetadata = {
+      ...metadataBefore,
+      lastFinalIndex: renamedIndexes.length > 0
+        ? Math.max.apply(null, renamedIndexes)
+        : (metadataBefore.lastFinalIndex || 0),
+      lastFinalRange: renamedIndexes.length > 0
+        ? { start: Math.min.apply(null, renamedIndexes), end: Math.max.apply(null, renamedIndexes) }
+        : (metadataBefore.lastFinalRange || null),
+      lastPersistMode: persistMode,
+      lastUpdated: nowIso,
+      lastFinalUpdated: nowIso,
+      lastRegroupementId: regroupementInfo.id || metadataBefore.lastRegroupementId || '',
+      lastRegroupementLabel: regroupementInfo.label || metadataBefore.lastRegroupementLabel || ''
+    };
+
+    saveContinuationMetadata_(typePrefix, updatedMetadata);
 
     return {
       success: true,
       message: 'Groupes finalisés et rendus visibles',
       type: type,
       prefix: typePrefix,
-      count: tempSheets.length
+      count: tempSheets.length,
+      persistMode: persistMode,
+      lastFinalRange: updatedMetadata.lastFinalRange || null,
+      finalizedAt: nowIso
     };
   } catch (e) {
     console.error('❌ Erreur finalizeTempGroups:', e.toString());
