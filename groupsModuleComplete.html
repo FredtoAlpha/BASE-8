@@ -1363,22 +1363,39 @@
 
     return `
       <div class="flex flex-col h-full">
-        <!-- BANDEAU MODE CONTINUATION -->
-        ${state.tempOffsetStart > 1 ? `
-          <div class="flex-shrink-0 mb-6 bg-blue-100 border-l-4 border-blue-600 p-4 rounded">
-            <p class="text-blue-900 font-bold text-lg">
-              🔄 MODE CONTINUATION ACTIF
-            </p>
-            ${state.lastTempRange ? `
-              <p class="text-blue-800 text-sm mt-1">
-                Groupes précédents: ${getGroupPrefix()}${state.lastTempRange.min} → ${getGroupPrefix()}${state.lastTempRange.max} (${state.lastTempRange.count} groupes)
+        <!-- 🆕 BANDEAU MODE CONTINUATION + REGROUPEMENT ISOLATION -->
+        ${(state.tempOffsetStart > 1 || state.activeGroupingId) ? `
+          <div class="flex-shrink-0 mb-6 bg-gradient-to-r from-blue-50 to-indigo-50 border-l-4 border-indigo-600 p-4 rounded-lg shadow-sm">
+            <div class="flex items-center justify-between mb-2">
+              <p class="text-indigo-900 font-bold text-lg">
+                ${state.activeGroupingId ? '📦' : '🔄'} ${state.activeGroupingId ? 'ISOLATION REGROUPEMENT' : 'MODE CONTINUATION'} ACTIF
               </p>
-            ` : ''}
-            <p class="text-blue-700 text-sm font-semibold mt-2">
-              ✨ Prochains groupes: ${getGroupPrefix()}${state.tempOffsetStart} → ${getGroupPrefix()}${state.tempOffsetStart + state.generatedGroups.length - 1}
-            </p>
-            <p class="text-blue-700 text-xs mt-2 italic">
-              Sauvegarder → "Ajouter" pour continuer la série | "Remplacer" pour recommencer
+              ${state.activeGroupingId ? `<span class="px-3 py-1 bg-indigo-200 text-indigo-900 rounded-full text-sm font-semibold">${state.activeGroupingId}</span>` : ''}
+            </div>
+
+            <div class="grid grid-cols-2 gap-3 mt-3">
+              ${state.activeGroupingId ? `
+                <div class="bg-white/60 p-2 rounded border border-indigo-200">
+                  <p class="text-xs text-indigo-700 font-semibold">Regroupement</p>
+                  <p class="text-sm text-indigo-900 font-bold">${state.activeGroupingId}</p>
+                </div>
+              ` : ''}
+
+              ${state.lastTempRange ? `
+                <div class="bg-white/60 p-2 rounded border border-blue-200">
+                  <p class="text-xs text-blue-700 font-semibold">Groupes précédents</p>
+                  <p class="text-sm text-blue-900 font-bold">${getGroupPrefix()}${state.lastTempRange.min}...${state.lastTempRange.max}</p>
+                </div>
+              ` : ''}
+
+              <div class="bg-white/60 p-2 rounded border border-green-200">
+                <p class="text-xs text-green-700 font-semibold">Prochains groupes</p>
+                <p class="text-sm text-green-900 font-bold">${getGroupPrefix()}${state.tempOffsetStart}...${state.tempOffsetStart + state.generatedGroups.length - 1}</p>
+              </div>
+            </div>
+
+            <p class="text-indigo-700 text-xs mt-3 italic border-t border-indigo-200 pt-2">
+              💡 Sauvegarder → "Ajouter" pour continuer | "Remplacer" pour recommencer ${state.activeGroupingId ? ' | Cette passe est isolée' : ''}
             </p>
           </div>
         ` : ''}
@@ -1391,55 +1408,67 @@
                 ${state.generatedGroups.length} groupe(s) • ${getTotalStudents()} élèves répartis
               </p>
             </div>
-            <div class="flex items-center gap-3 flex-wrap justify-end">
-              <!-- Mode de sauvegarde: Remplacer ou Ajouter -->
-              <div class="flex items-center gap-2 bg-slate-100 p-2 rounded-lg">
-                <button type="button" class="action-btn ${state.saveMode === 'replace' ? 'bg-red-600 text-white' : 'bg-slate-200 text-slate-700'}" data-action="set-save-mode" data-mode="replace" title="Remplacer: supprime les groupes précédents du même type">
-                  <i class="fas fa-arrows-rotate"></i>
-                  Remplacer
+            <!-- 🆕 SPRINT #6: ACTION BAR RÉORGANISÉE EN 4 GROUPES -->
+            <div class="flex items-center gap-4 flex-wrap justify-end">
+              <!-- GROUPE 1: CALCUL -->
+              <div class="flex items-center gap-2 border-r border-slate-300 pr-4">
+                <button type="button" class="action-btn bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2" data-action="regenerate" title="Recalculer avec nouvel algorithme">
+                  <i class="fas fa-rotate-right"></i>
+                  Régénérer
                 </button>
-                <button type="button" class="action-btn ${state.saveMode === 'append' ? 'bg-green-600 text-white' : 'bg-slate-200 text-slate-700'}" data-action="set-save-mode" data-mode="append" title="Ajouter: cumule avec les groupes existants">
-                  <i class="fas fa-plus-circle"></i>
-                  Ajouter
+                <button type="button" class="action-btn ${state.showStatistics ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'} hover:bg-indigo-700 px-3 py-2" data-action="toggle-statistics">
+                  <i class="fas fa-chart-bar"></i>
+                  Stats
                 </button>
               </div>
 
-              <button type="button" class="action-btn ${state.showStatistics ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'} hover:bg-indigo-700" data-action="toggle-statistics">
-                <i class="fas fa-chart-bar"></i>
-                Statistiques
-              </button>
-              <button type="button" class="action-btn bg-slate-100 hover:bg-slate-200 text-slate-700" data-action="regenerate">
-                <i class="fas fa-rotate-right"></i>
-                Régénérer
-              </button>
-              <button type="button" class="action-btn bg-blue-100 hover:bg-blue-200 text-blue-700" data-action="export-pdf">
-                <i class="fas fa-file-pdf"></i>
-                PDF
-              </button>
-              <button type="button" class="action-btn bg-green-100 hover:bg-green-200 text-green-700" data-action="export-csv">
-                <i class="fas fa-file-csv"></i>
-                CSV
-              </button>
-              <button type="button" class="action-btn bg-yellow-100 hover:bg-yellow-200 text-yellow-700" data-action="load-temp-groups" title="Charger les groupes temporaires sauvegardés">
-                <i class="fas fa-download"></i>
-                📥 Charger
-              </button>
-              <button type="button" class="action-btn bg-purple-100 hover:bg-purple-200 text-purple-700" data-action="show-snapshots" title="Voir l'historique et restaurer une version antérieure">
-                <i class="fas fa-history"></i>
-                📸 Snapshots
-              </button>
-              <button type="button" class="action-btn bg-cyan-100 hover:bg-cyan-200 text-cyan-700" data-action="show-audit-history" title="Voir l'historique complet des opérations d'audit">
-                <i class="fas fa-list"></i>
-                📋 Historique
-              </button>
-              <button type="button" class="action-btn bg-orange-600 hover:bg-orange-700 text-white" data-action="save-temp-groups" title="Sauvegarder les groupes en version temporaire (cachée)">
-                <i class="fas fa-save"></i>
-                💾 Temp
-              </button>
-              <button type="button" class="action-btn bg-green-600 hover:bg-green-700 text-white" data-action="finalize-temp-groups" title="Finaliser : convertir gr*TEMP en gr* (visibles)">
-                <i class="fas fa-check-circle"></i>
-                ✅ Finaliser
-              </button>
+              <!-- GROUPE 2: SAUVEGARDE -->
+              <div class="flex items-center gap-2 border-r border-slate-300 pr-4">
+                <div class="flex items-center gap-2 bg-slate-100 p-2 rounded-lg">
+                  <button type="button" class="action-btn ${state.saveMode === 'replace' ? 'bg-red-600 text-white' : 'bg-slate-200 text-slate-700'} px-3 py-1 text-sm" data-action="set-save-mode" data-mode="replace" title="Mode REMPLACER: demande confirmation">
+                    <i class="fas fa-arrows-rotate"></i>
+                  </button>
+                  <button type="button" class="action-btn ${state.saveMode === 'append' ? 'bg-green-600 text-white' : 'bg-slate-200 text-slate-700'} px-3 py-1 text-sm" data-action="set-save-mode" data-mode="append" title="Mode AJOUTER: continue la série">
+                    <i class="fas fa-plus-circle"></i>
+                  </button>
+                </div>
+                <button type="button" class="action-btn bg-orange-600 hover:bg-orange-700 text-white px-3 py-2" data-action="save-temp-groups" title="Sauvegarder temporaire (caché)">
+                  <i class="fas fa-save"></i>
+                  Temp
+                </button>
+                <button type="button" class="action-btn bg-green-600 hover:bg-green-700 text-white px-3 py-2" data-action="finalize-temp-groups" title="Finaliser → visible">
+                  <i class="fas fa-check-circle"></i>
+                  Finali
+                </button>
+              </div>
+
+              <!-- GROUPE 3: EXPORTS -->
+              <div class="flex items-center gap-2 border-r border-slate-300 pr-4">
+                <button type="button" class="action-btn bg-blue-100 hover:bg-blue-200 text-blue-700 px-3 py-2" data-action="export-pdf">
+                  <i class="fas fa-file-pdf"></i>
+                  PDF
+                </button>
+                <button type="button" class="action-btn bg-green-100 hover:bg-green-200 text-green-700 px-3 py-2" data-action="export-csv">
+                  <i class="fas fa-file-csv"></i>
+                  CSV
+                </button>
+              </div>
+
+              <!-- GROUPE 4: NAVIGATION & HISTORIQUE -->
+              <div class="flex items-center gap-2">
+                <button type="button" class="action-btn bg-yellow-100 hover:bg-yellow-200 text-yellow-700 px-3 py-2" data-action="load-temp-groups" title="Charger TEMP sauvegardés">
+                  <i class="fas fa-download"></i>
+                  Charger
+                </button>
+                <button type="button" class="action-btn bg-purple-100 hover:bg-purple-200 text-purple-700 px-3 py-2" data-action="show-snapshots" title="Snapshots + restore">
+                  <i class="fas fa-history"></i>
+                  📸
+                </button>
+                <button type="button" class="action-btn bg-cyan-100 hover:bg-cyan-200 text-cyan-700 px-3 py-2" data-action="show-audit-history" title="Audit complet">
+                  <i class="fas fa-list"></i>
+                  📋
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1482,11 +1511,14 @@
   function renderGroupCard(group, index) {
     const stats = calculateGroupStats(group);
 
-    // Afficher le vrai numéro du groupe (en tenant compte de l'offset)
+    // 🆕 SPRINT #6: Afficher le vrai numéro du groupe (en tenant compte de l'offset)
     const groupNumber = state.tempOffsetStart + index;
     const groupPrefix = getGroupPrefix();
     const groupName = `${groupPrefix}${groupNumber}`;
     const groupLabel = group.name || groupName;
+
+    // 🆕 Contexte: passe/regroupement actif
+    const groupingContext = state.activeGroupingId ? `${state.activeGroupingId}` : 'Par défaut';
 
     return `
       <div class="group-card" data-group-index="${index}">
@@ -1494,7 +1526,11 @@
           <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
             <div>
               <h4 class="group-title">${groupLabel}</h4>
-              <p style="font-size: 0.75rem; opacity: 0.8; margin-top: 0.25rem;">Code: <code>${groupName}</code></p>
+              <!-- 🆕 SPRINT #6: Ajouter contexte de regroupement + range pédagogique -->
+              <div style="font-size: 0.7rem; opacity: 0.85; margin-top: 0.35rem; display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                <code style="background: rgba(255,255,255,0.3); padding: 0.2rem 0.4rem; border-radius: 0.2rem;">${groupName}</code>
+                ${state.activeGroupingId ? `<span style="background: rgba(255,255,255,0.3); padding: 0.2rem 0.4rem; border-radius: 0.2rem;">📦 ${groupingContext}</span>` : ''}
+              </div>
             </div>
             <span class="group-count">${group.students.length} élèves</span>
           </div>
@@ -3253,8 +3289,10 @@
       const finalSaveMode = state.persistMode ? 'append' : state.saveMode;
       const finalOffsetStart = state.persistMode ? state.tempOffsetStart : undefined;
 
+      // 🆕 SPRINT #6: Si activeGroupingId est défini, l'inclure (isolation par passe)
       const payload = {
         type: state.groupType,
+        groupingId: state.activeGroupingId || 'default', // 🆕 Isolation par regroupement
         saveMode: finalSaveMode,        // Force 'append' si persistMode
         offsetStart: finalOffsetStart,  // Numéro de départ explicite si persistMode
         persistMode: state.persistMode, // true = continuer la série
@@ -3353,7 +3391,8 @@
     google.script.run
       .withSuccessHandler((result) => {
         if (result.success) {
-          showToast(`✅ ${typeName} finalisés ! (${result.prefix}1, ${result.prefix}2, ...)`, 'success');
+          const groupingLabel = state.activeGroupingId || 'tous';
+          showToast(`✅ ${typeName} finalisés pour ${groupingLabel} !`, 'success');
 
           // Si persistMode était actif, le réinitialiser après finalisation réussie
           if (state.persistMode) {
@@ -3371,7 +3410,7 @@
       .withFailureHandler(error => {
         showToast(`Erreur de finalisation : ${error?.message || error}`, 'error');
       })
-      .finalizeTempGroups(state.groupType, finalizeMode);
+      .finalizeTempGroups(state.groupType, finalizeMode, state.activeGroupingId || 'default'); // 🆕 Pass groupingId
   }
 
   function loadTempGroupsUI() {
