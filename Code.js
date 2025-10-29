@@ -2188,6 +2188,19 @@ function saveTempGroups(payload) {
     const results = [];
     let totalEleves = 0;
 
+    // 🔄 Nettoyer les anciens onglets TEMP pour ce préfixe avant de recréer les groupes
+    const existingTempSheets = ss.getSheets().filter(sh => {
+      const name = sh.getName();
+      return name.startsWith(typePrefix) && name.endsWith('TEMP');
+    });
+
+    existingTempSheets.forEach(sh => {
+      console.log('   🗑️ Suppression ancien TEMP: ' + sh.getName());
+      ss.deleteSheet(sh);
+    });
+
+    const createdSheets = [];
+
     // Sauvegarder chaque groupe avec suffix TEMP
     for (let idx = 0; idx < payload.groups.length; idx++) {
       const group = payload.groups[idx];
@@ -2231,14 +2244,15 @@ function saveTempGroups(payload) {
       });
 
       totalEleves += studentsData.length;
+      createdSheets.push(tempGroupName);
     }
 
-    // Cacher les onglets TEMP
-    const sheets = ss.getSheets();
-    sheets.forEach(sh => {
-      if (sh.getName().endsWith('TEMP')) {
+    // Cacher uniquement les onglets TEMP créés pendant cette sauvegarde
+    createdSheets.forEach(name => {
+      const sh = ss.getSheetByName(name);
+      if (sh) {
         sh.hideSheet();
-        console.log('   👁️ Masqué: ' + sh.getName());
+        console.log('   👁️ Masqué: ' + name);
       }
     });
 
@@ -2305,6 +2319,114 @@ function getTempGroupsInfo() {
     return { success: true, tempInfo: tempInfo };
   } catch (e) {
     console.error('❌ Erreur getTempGroupsInfo:', e.toString());
+    return { success: false, error: e.toString() };
+  }
+}
+
+/**
+ * Génère un PDF récapitulatif des groupes et renvoie le fichier encodé en base64.
+ * @param {Object} payload - { groups: [...], type: string, config: Object }
+ */
+function exportGroupsToPDF(payload) {
+  try {
+    if (!payload || !Array.isArray(payload.groups) || payload.groups.length === 0) {
+      return { success: false, error: 'Aucun groupe à exporter' };
+    }
+
+    const timestamp = new Date();
+    const timezone = Session.getScriptTimeZone();
+    const isoDate = Utilities.formatDate(timestamp, timezone, 'yyyy-MM-dd_HH-mm');
+    const fileName = `Groupes_${payload.type || 'besoins'}_${isoDate}.pdf`;
+
+    const doc = DocumentApp.create(fileName.replace('.pdf', ''));
+    const body = doc.getBody();
+    body.clear();
+
+    body.appendParagraph('Répartition des groupes').setHeading(DocumentApp.ParagraphHeading.TITLE);
+    body.appendParagraph(`Généré le ${Utilities.formatDate(timestamp, timezone, 'dd/MM/yyyy à HH:mm')}`).setSpacingAfter(15);
+
+    if (payload.config) {
+      const metaRows = [];
+      metaRows.push(['Type de groupes', payload.config.groupTypeLabel || payload.type || '—']);
+
+      if (payload.config.selectedClasses && payload.config.selectedClasses.length) {
+        metaRows.push(['Classes concernées', payload.config.selectedClasses.join(', ')]);
+      }
+      if (payload.config.numGroups) {
+        metaRows.push(['Nombre de groupes', payload.config.numGroups]);
+      }
+      if (payload.config.subjectLabel) {
+        metaRows.push(['Discipline', payload.config.subjectLabel]);
+      }
+      if (payload.config.distributionLabel) {
+        metaRows.push(['Mode de répartition', payload.config.distributionLabel]);
+      }
+      if (payload.config.languageLabel) {
+        metaRows.push(['Langue', payload.config.languageLabel]);
+      }
+
+      if (metaRows.length > 0) {
+        const metaTable = body.appendTable(metaRows);
+        metaTable.setBorderWidth(0);
+        metaRows.forEach((_, rowIdx) => {
+          const cell = metaTable.getCell(rowIdx, 0);
+          cell.getChild(0).asParagraph().setBold(true);
+        });
+        body.appendParagraph('').setSpacingAfter(15);
+      }
+    }
+
+    payload.groups.forEach((group, index) => {
+      const title = `Groupe ${index + 1} - ${group.name || 'Sans nom'} (${(group.students || []).length} élèves)`;
+      body.appendParagraph(title).setHeading(DocumentApp.ParagraphHeading.HEADING2);
+
+      const rows = [];
+      rows.push(['Nom', 'Prénom', 'Sexe', 'Classe', 'Score F', 'Score M', 'COM', 'TRA', 'PART', 'LV2', 'Option']);
+
+      (group.students || []).forEach(student => {
+        const scores = student.scores || {};
+        rows.push([
+          student.nom || '',
+          student.prenom || '',
+          (student.sexe || '').toString(),
+          student.classe || '',
+          String(scores.F ?? student.scoreF ?? ''),
+          String(scores.M ?? student.scoreM ?? ''),
+          String(scores.COM ?? student.com ?? ''),
+          String(scores.TRA ?? student.tra ?? ''),
+          String(scores.PART ?? student.part ?? ''),
+          student.lv2 || '',
+          student.opt || ''
+        ]);
+      });
+
+      const table = body.appendTable(rows);
+      const headerRow = table.getRow(0);
+      const headerCellCount = headerRow.getNumCells();
+      for (let cellIdx = 0; cellIdx < headerCellCount; cellIdx++) {
+        const cell = headerRow.getCell(cellIdx);
+        cell.setBackgroundColor('#e5e7eb');
+        cell.getChild(0).asParagraph().setBold(true);
+      }
+
+      body.appendParagraph('').setSpacingAfter(10);
+    });
+
+    doc.saveAndClose();
+
+    const pdfBlob = doc.getAs('application/pdf').setName(fileName);
+    DriveApp.getFileById(doc.getId()).setTrashed(true);
+
+    const base64Data = Utilities.base64Encode(pdfBlob.getBytes());
+
+    return {
+      success: true,
+      fileName: fileName,
+      mimeType: 'application/pdf',
+      data: base64Data
+    };
+  } catch (e) {
+    console.error('❌ Erreur exportGroupsToPDF:', e.toString());
     return { success: false, error: e.toString() };
   }
 }
