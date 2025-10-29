@@ -165,30 +165,6 @@
     }
   }
 
-  function downloadBase64File(base64Data, fileName, mimeType) {
-    try {
-      const byteCharacters = atob(base64Data);
-      const byteNumbers = new Array(byteCharacters.length);
-      for (let i = 0; i < byteCharacters.length; i++) {
-        byteNumbers[i] = byteCharacters.charCodeAt(i);
-      }
-      const byteArray = new Uint8Array(byteNumbers);
-      const blob = new Blob([byteArray], { type: mimeType });
-      const url = URL.createObjectURL(blob);
-      const link = documentRef.createElement('a');
-      link.href = url;
-      link.download = fileName;
-      documentRef.body.appendChild(link);
-      link.click();
-      documentRef.body.removeChild(link);
-      URL.revokeObjectURL(url);
-      return true;
-    } catch (error) {
-      console.error('❌ Erreur downloadBase64File:', error);
-      return false;
-    }
-  }
-
   function formatDate(date) {
     return new Date(date).toLocaleString('fr-FR', {
       day: '2-digit',
@@ -197,6 +173,46 @@
       hour: '2-digit',
       minute: '2-digit'
     });
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  NORMALISATION DES SCORES
+  // ═══════════════════════════════════════════════════════════════
+  // Fallback pour les scores manquants ou mal formatés
+  // Gère les trois formats : scores.F/M, scoreF/scoreM, SCORE_F/SCORE_M
+  function normalizeScores(student) {
+    if (!student) return student;
+
+    const toNum = v => (v === '' || v == null) ? null : Number(v);
+
+    // Chercher F (Français) dans les trois lieux possibles
+    const f = toNum(
+      student?.scores?.F ??
+      student?.scoreF ??
+      student?.SCORE_F ??
+      null
+    );
+
+    // Chercher M (Mathématiques) dans les trois lieux possibles
+    const m = toNum(
+      student?.scores?.M ??
+      student?.scoreM ??
+      student?.SCORE_M ??
+      null
+    );
+
+    // Garantir la structure scores.F/M
+    if (!student.scores) {
+      student.scores = {};
+    }
+    student.scores.F = Number.isFinite(f) ? f : null;
+    student.scores.M = Number.isFinite(m) ? m : null;
+
+    // Garder aussi les top-level pour compatibilité
+    student.scoreF = student.scores.F;
+    student.scoreM = student.scores.M;
+
+    return student;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -321,6 +337,7 @@
           const sexe = card.getAttribute('data-sexe') ||
                        card.querySelector('.tag-sex')?.textContent?.trim() ||
                        '';
+          const source = card.getAttribute('data-source') || ''; // classe d'origine
 
           snapshot[classId].eleves.push({
             id: sid,
@@ -328,6 +345,7 @@
             prenom,
             sexe,
             classe: classId,
+            source: source,
             scores: {} // pas idéal mais ça évite les crash
           });
         }
@@ -983,58 +1001,83 @@
       `;
     }
 
-    return `
-      <div>
-        <div class="flex items-center justify-between mb-6">
-          <div>
-            <h3 class="text-2xl font-bold text-slate-900">Groupes générés</h3>
-            <p class="text-sm text-slate-600 mt-1">
-              ${state.generatedGroups.length} groupe(s) • ${getTotalStudents()} élèves répartis
-            </p>
-          </div>
-          <div class="flex items-center gap-3">
-            <button type="button" class="action-btn ${state.showStatistics ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'} hover:bg-indigo-700" data-action="toggle-statistics">
-              <i class="fas fa-chart-bar"></i>
-              Statistiques
-            </button>
-            <button type="button" class="action-btn bg-slate-100 hover:bg-slate-200 text-slate-700" data-action="regenerate">
-              <i class="fas fa-rotate-right"></i>
-              Régénérer
-            </button>
-            <button type="button" class="action-btn bg-blue-100 hover:bg-blue-200 text-blue-700" data-action="export-pdf">
-              <i class="fas fa-file-pdf"></i>
-              PDF
-            </button>
-            <button type="button" class="action-btn bg-green-100 hover:bg-green-200 text-green-700" data-action="export-csv">
-              <i class="fas fa-file-csv"></i>
-              CSV
-            </button>
-            <button type="button" class="action-btn bg-yellow-100 hover:bg-yellow-200 text-yellow-700" data-action="load-temp-groups" title="Charger les groupes temporaires sauvegardés">
-              <i class="fas fa-download"></i>
-              📥 Charger
-            </button>
-            <button type="button" class="action-btn bg-orange-600 hover:bg-orange-700 text-white" data-action="save-temp-groups" title="Sauvegarder les groupes en version temporaire (cachée)">
-              <i class="fas fa-save"></i>
-              💾 Temp
-            </button>
-            <button type="button" class="action-btn bg-green-600 hover:bg-green-700 text-white" data-action="finalize-temp-groups" title="Finaliser : convertir gr*TEMP en gr* (visibles)">
-              <i class="fas fa-check-circle"></i>
-              ✅ Finaliser
-            </button>
-          </div>
-        </div>
+    // LAYOUT : Adapter le nombre de colonnes selon le nombre de groupes
+    // Objectif : maximiser la HAUTEUR verticale de chaque groupe pour plus de swaps
+    // - 1-3 groupes : autant de colonnes (côte à côte)
+    // - 4 groupes : 2 colonnes (2x2 grid)
+    // - 5-6 groupes : 3 colonnes (max) pour garder hauteur
+    // - 7+ groupes : 3 colonnes + scroll horizontal
+    const groupCount = state.generatedGroups.length;
+    let gridClass = '';
 
-        <div class="flex gap-6">
-          <div class="${state.showStatistics ? 'flex-1' : 'w-full'}">
-            <div class="grid ${state.showStatistics ? 'md:grid-cols-2 lg:grid-cols-3' : 'md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6'} gap-4" id="groups-container">
-              ${state.generatedGroups.map((group, index) => renderGroupCard(group, index)).join('')}
+    if (groupCount <= 3) {
+      gridClass = `grid-cols-${groupCount}`; // 1, 2 ou 3 colonnes selon le nombre
+    } else if (groupCount === 4) {
+      gridClass = 'grid-cols-2'; // 2x2 grid
+    } else if (groupCount <= 6) {
+      gridClass = 'grid-cols-3'; // 3 colonnes max pour garder hauteur
+    } else {
+      gridClass = 'grid-cols-3'; // 3 colonnes + scroll pour 7+
+    }
+
+    return `
+      <div class="flex flex-col h-full">
+        <div class="flex-shrink-0 mb-6">
+          <div class="flex items-center justify-between">
+            <div>
+              <h3 class="text-2xl font-bold text-slate-900">Groupes générés</h3>
+              <p class="text-sm text-slate-600 mt-1">
+                ${state.generatedGroups.length} groupe(s) • ${getTotalStudents()} élèves répartis
+              </p>
+            </div>
+            <div class="flex items-center gap-3 flex-wrap justify-end">
+              <button type="button" class="action-btn ${state.showStatistics ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'} hover:bg-indigo-700" data-action="toggle-statistics">
+                <i class="fas fa-chart-bar"></i>
+                Statistiques
+              </button>
+              <button type="button" class="action-btn bg-slate-100 hover:bg-slate-200 text-slate-700" data-action="regenerate">
+                <i class="fas fa-rotate-right"></i>
+                Régénérer
+              </button>
+              <button type="button" class="action-btn bg-blue-100 hover:bg-blue-200 text-blue-700" data-action="export-pdf">
+                <i class="fas fa-file-pdf"></i>
+                PDF
+              </button>
+              <button type="button" class="action-btn bg-green-100 hover:bg-green-200 text-green-700" data-action="export-csv">
+                <i class="fas fa-file-csv"></i>
+                CSV
+              </button>
+              <button type="button" class="action-btn bg-yellow-100 hover:bg-yellow-200 text-yellow-700" data-action="load-temp-groups" title="Charger les groupes temporaires sauvegardés">
+                <i class="fas fa-download"></i>
+                📥 Charger
+              </button>
+              <button type="button" class="action-btn bg-orange-600 hover:bg-orange-700 text-white" data-action="save-temp-groups" title="Sauvegarder les groupes en version temporaire (cachée)">
+                <i class="fas fa-save"></i>
+                💾 Temp
+              </button>
+              <button type="button" class="action-btn bg-green-600 hover:bg-green-700 text-white" data-action="finalize-temp-groups" title="Finaliser : convertir gr*TEMP en gr* (visibles)">
+                <i class="fas fa-check-circle"></i>
+                ✅ Finaliser
+              </button>
             </div>
           </div>
-
-          ${state.showStatistics ? renderStatisticsPanel() : ''}
         </div>
 
-        <div class="mt-6 bg-indigo-50 border border-indigo-200 rounded-xl p-4 flex items-start gap-3">
+        <!-- Contenu flexible et scrollable -->
+        <div class="flex-1 overflow-y-auto">
+          <div class="flex gap-6">
+            <div class="${state.showStatistics ? 'flex-1' : 'w-full'}">
+              <div class="grid ${gridClass} gap-4" id="groups-container">
+                ${state.generatedGroups.map((group, index) => renderGroupCard(group, index)).join('')}
+              </div>
+            </div>
+
+            ${state.showStatistics ? renderStatisticsPanel() : ''}
+          </div>
+        </div>
+
+        <!-- Info fixe en bas -->
+        <div class="flex-shrink-0 mt-6 bg-indigo-50 border border-indigo-200 rounded-xl p-4 flex items-start gap-3">
           <i class="fas fa-hand-pointer text-indigo-600 text-xl mt-0.5"></i>
           <div class="text-sm text-indigo-900">
             <p class="font-semibold mb-1">Glisser-déposer activé :</p>
@@ -1084,17 +1127,23 @@
   function renderStudentCard(student) {
     const nomAffiche = simplifierNomComplet(student.nom, student.prenom);
 
+    // Déterminer si l'élève a un score COM = 1 (besoin d'attention)
+    const comScore = student.scores?.COM ?? student.com ?? 0;
+    const isComRed = comScore === 1;
+    const nameClass = isComRed ? 'text-red-600 font-semibold' : '';
+
     return `
-      <div class="student-card" data-student-id="${student.id}">
-        <div class="flex items-center gap-2 flex-1">
-          <span class="student-sexe ${student.sexe === 'F' ? 'sexe-f' : 'sexe-m'}">${student.sexe || '?'}</span>
-          <div class="flex-1 min-w-0">
-            <p class="student-name">${nomAffiche}</p>
-            <p class="student-meta">${student.classe || '—'}</p>
+      <div class="student-card" data-student-id="${student.id}" data-source="${student.source || ''}">
+        <span class="student-sexe ${student.sexe === 'F' ? 'sexe-f' : 'sexe-m'}" title="${student.sexe}">${student.sexe || '?'}</span>
+        <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.125rem;">
+          <p class="student-name ${nameClass}" title="${nomAffiche}">${nomAffiche}</p>
+          <div style="display: flex; gap: 0.25rem; font-size: 0.65rem; color: #64748b;">
+            <span title="Classe FIN">${student.classe || '—'}</span>
+            ${student.source ? `<span title="Classe origine">| ${student.source}</span>` : ''}
           </div>
         </div>
         ${renderStudentScores(student)}
-        <i class="fas fa-grip-vertical text-slate-300 drag-handle"></i>
+        <i class="fas fa-grip-vertical text-slate-300 drag-handle" style="flex-shrink: 0; font-size: 0.7rem;"></i>
       </div>
     `;
   }
@@ -1770,9 +1819,10 @@
               sexe:   e.sexe || e.SEXE || e.sex || '',
               classe: displayName,
 
-              // Options
+              // Options et source d'origine
               lv2: e.lv2 || e.LV2 || null,
               opt: e.opt || e.OPT || null,
+              source: e.source || e.SOURCE || null,  // classe d'année précédente
 
               // Scores bruts regroupés
               scores: {
@@ -1800,11 +1850,14 @@
           });
         });
 
-        state.students = students;
-        state.studentsById = new Map(students.map(s => [s.id, s]));
+        // CORRECTIF A : Appliquer normalizeScores sur chaque élève
+        // pour garantir que scores.F et scores.M existent quelle que soit la source
+        state.students = students.map(normalizeScores);
+        state.studentsById = new Map(state.students.map(s => [s.id, s]));
 
-        console.log(`[GroupsModule] 📊 Total d'élèves chargés: ${students.length}`);
+        console.log(`[GroupsModule] 📊 Total d'élèves chargés: ${state.students.length}`);
         console.log('[GroupsModule] 🔍 DEBUG - Premier élève normalisé:', state.students[0]);
+        console.log('[GroupsModule] ✅ Scores normalisés pour tous les élèves');
 
         resolve(students);
       } catch (error) {
@@ -2152,25 +2205,46 @@
       return;
     }
 
-    showToast('📥 Chargement des groupes temporaires...', 'info');
+    // D'abord, vérifier quels TEMP existent
+    showToast('Vérification des groupes temporaires...', 'info');
 
     google.script.run
-      .withSuccessHandler((result) => {
-        if (result.success && result.groups && result.groups.length > 0) {
-          // Charger les groupes depuis Google Sheets
-          state.generatedGroups = result.groups;
-          state.currentStep = 5; // Aller à l'aperçu
-          updateUI();
-          showToast(`✅ ${result.totalGroups} groupes chargés (${result.groups.reduce((sum, g) => sum + g.count, 0)} élèves)`, 'success');
-          console.log('[GroupsModule] Groupes chargés:', state.generatedGroups);
+      .withSuccessHandler((listResult) => {
+        if (listResult.success && listResult.count > 0) {
+          var tempInfo = 'Groupes TEMP existants: ' +
+            listResult.minNumber + ' à ' + listResult.maxNumber +
+            ' (' + listResult.count + ' groupes, ' + listResult.totalStudents + ' élèves)';
+          console.log(tempInfo);
+
+          // Maintenant charger les groupes
+          showToast('📥 Chargement des groupes temporaires...', 'info');
+
+          google.script.run
+            .withSuccessHandler((result) => {
+              if (result.success && result.groups && result.groups.length > 0) {
+                state.generatedGroups = result.groups;
+                state.currentStep = 5;
+                updateUI();
+                var totalStudents = result.groups.reduce((sum, g) => sum + (g.students ? g.students.length : 0), 0);
+                showToast('✅ ' + result.totalGroups + ' groupes chargés (' + totalStudents + ' élèves)', 'success');
+                console.log('[GroupsModule] Groupes chargés:', state.generatedGroups);
+              } else {
+                showToast('Impossible de charger les groupes temporaires', 'warning');
+              }
+            })
+            .withFailureHandler(error => {
+              showToast('Erreur de chargement : ' + (error?.message || error), 'error');
+            })
+            .loadTempGroups(state.groupType);
         } else {
-          showToast('Aucun groupe temporaire trouvé', 'warning');
+          showToast('Aucun groupe temporaire trouvé pour le type: ' + state.groupType, 'warning');
         }
       })
       .withFailureHandler(error => {
-        showToast(`Erreur de chargement : ${error?.message || error}`, 'error');
+        console.error('Erreur listTempGroups:', error);
+        showToast('Impossible de lister les groupes: ' + (error?.message || error), 'error');
       })
-      .loadTempGroups(state.groupType);
+      .listTempGroups(state.groupType);
   }
 
   // Alias pour compatibilité avec anciens appels
@@ -2179,68 +2253,8 @@
   }
 
   function exportToPDF() {
-    if (!state.generatedGroups || state.generatedGroups.length === 0) {
-      showToast('Aucun groupe à exporter', 'warning');
-      return;
-    }
-
-    if (!google?.script?.run) {
-      showToast('Google Apps Script non disponible', 'error');
-      return;
-    }
-
-    const sanitizeStudent = (student) => ({
-      id: student.id,
-      nom: student.nom,
-      prenom: student.prenom,
-      sexe: student.sexe,
-      classe: student.classe,
-      lv2: student.lv2,
-      opt: student.opt,
-      scores: {
-        F: student.scores?.F ?? student.scoreF ?? '',
-        M: student.scores?.M ?? student.scoreM ?? '',
-        COM: student.scores?.COM ?? student.com ?? '',
-        TRA: student.scores?.TRA ?? student.tra ?? '',
-        PART: student.scores?.PART ?? student.part ?? ''
-      }
-    });
-
-    const payload = {
-      type: state.groupType,
-      config: {
-        groupTypeLabel: GROUP_TYPES[state.groupType]?.title || state.groupType,
-        selectedClasses: state.selectedClasses,
-        numGroups: state.numGroups,
-        subjectLabel: state.groupType === 'needs' ? (SUBJECTS[state.selectedSubject]?.label || state.selectedSubject) : undefined,
-        distributionLabel: state.groupType === 'needs' ? (DISTRIBUTION_TYPES[state.distributionType]?.label || state.distributionType) : undefined,
-        languageLabel: state.groupType === 'language' ? state.selectedLanguage : undefined
-      },
-      groups: state.generatedGroups.map(group => ({
-        name: group.name,
-        students: (group.students || []).map(sanitizeStudent)
-      }))
-    };
-
-    showToast('📄 Génération du PDF...', 'info');
-
-    google.script.run
-      .withSuccessHandler((result) => {
-        if (result && result.success && result.data) {
-          const downloaded = downloadBase64File(result.data, result.fileName || 'groupes.pdf', result.mimeType || 'application/pdf');
-          if (downloaded) {
-            showToast('✅ PDF généré et téléchargé', 'success');
-          } else {
-            showToast('Erreur lors du téléchargement du PDF', 'error');
-          }
-        } else {
-          showToast(`Erreur export PDF: ${result?.error || 'Résultat invalide'}`, 'error');
-        }
-      })
-      .withFailureHandler(error => {
-        showToast(`Erreur export PDF : ${error?.message || error}`, 'error');
-      })
-      .exportGroupsToPDF(payload);
+    showToast('Export PDF en développement', 'info');
+    // TODO: Implémenter export PDF
   }
 
   function exportToCSV() {
@@ -2609,6 +2623,10 @@
         background: white;
         overflow: hidden;
         transition: all 0.2s ease;
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        min-height: 150px; /* hauteur min réduite pour maximiser l'espace de liste */
       }
 
       .group-card:hover {
@@ -2622,6 +2640,7 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
+        flex-shrink: 0;
       }
 
       .group-title {
@@ -2641,6 +2660,7 @@
         display: flex;
         gap: 1rem;
         flex-wrap: wrap;
+        flex-shrink: 0;
       }
 
       .stat-item {
@@ -2654,23 +2674,45 @@
 
       .group-students {
         padding: 1rem;
-        min-height: 8rem;
-        max-height: 24rem;
         overflow-y: auto;
+        flex: 1; /* Prend tout l'espace disponible */
+        min-height: 0; /* Important pour flexbox : permet au scroll de marcher */
+        scrollbar-width: thin;
+        scrollbar-color: #cbd5e1 #f1f5f9;
+      }
+
+      /* Scrollbar personnalisée (Webkit) */
+      .group-students::-webkit-scrollbar {
+        width: 6px;
+      }
+
+      .group-students::-webkit-scrollbar-track {
+        background: #f1f5f9;
+        border-radius: 3px;
+      }
+
+      .group-students::-webkit-scrollbar-thumb {
+        background: #cbd5e1;
+        border-radius: 3px;
+      }
+
+      .group-students::-webkit-scrollbar-thumb:hover {
+        background: #94a3b8;
       }
 
       /* STUDENT CARDS */
       .student-card {
         display: flex;
         align-items: center;
-        gap: 0.5rem;
-        padding: 0.5rem;
-        margin-bottom: 0.375rem;
+        gap: 0.375rem;
+        padding: 0.375rem;
+        margin-bottom: 0.25rem;
         border: 1px solid #e2e8f0;
         border-radius: 0.5rem;
         background: white;
         cursor: move;
         transition: all 0.2s ease;
+        font-size: 0.8rem;
       }
 
       .student-card:hover {
@@ -2702,16 +2744,25 @@
 
       .student-name {
         font-weight: 600;
-        font-size: 0.875rem;
+        font-size: 0.8rem;
         color: #1e293b;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        flex-shrink: 1;
+        min-width: 0;
       }
 
       .student-meta {
-        font-size: 0.75rem;
+        font-size: 0.7rem;
         color: #64748b;
+        white-space: nowrap;
+      }
+
+      .student-source {
+        font-size: 0.7rem;
+        color: #94a3b8;
+        white-space: nowrap;
       }
 
       .student-scores {
@@ -2721,12 +2772,13 @@
       }
 
       .score-badge {
-        padding: 0.25rem 0.5rem;
+        padding: 0.2rem 0.4rem;
         background: #f1f5f9;
         border-radius: 0.375rem;
-        font-size: 0.75rem;
+        font-size: 0.7rem;
         font-weight: 600;
         color: #475569;
+        white-space: nowrap;
       }
 
       .score-badge.avg {
