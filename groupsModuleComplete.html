@@ -85,24 +85,17 @@
 
     // Configuration
     groupType: null,                    // 'needs' | 'language' | 'option'
-    selectedClasses: [],                // ['6°1', '6°2', ...] (noms affichage)
+    selectedClasses: [],                // Classes utilisées pour le regroupement actif
     availableClasses: [],               // Classes visibles dans le board
-    numGroups: 3,                       // Nombre de groupes à créer
+    numGroups: 3,                       // Nombre de groupes à créer pour le regroupement actif
 
-    // Workflow multi-passes
-    passes: [],                         // Regroupements définis par l'utilisateur
-    activePassId: null,                 // Pass actuellement configuré/affiché
-    passSequence: 1,                    // Compteur pour nommer les regroupements
-    persistMode: 'continue',            // 'replace' | 'continue'
-    tempOffsetStart: 1,                 // Index de départ pour la numérotation
-    lastTempRange: { start: null, end: null }, // Dernière plage TEMP créée
-    lastTempSavedAt: null,
-    lastFinalRange: { start: null, end: null },
-    lastFinalizedAt: null,
-    continuationStatus: null,           // Métadonnées renvoyées par Apps Script
-    isLoadingContinuation: false,
-    continuationStatusError: null,
-    newPassLabel: '',
+    // Gestion des regroupements multi-passes
+    regroupements: [],                  // [{ id, label, classes, groupCount, persistMode, offsetStart, offsetEnd }]
+    activeRegroupementId: null,
+    pendingClasses: [],                 // Sélection temporaire lors de l'étape 2
+    newRegroupementLabel: '',
+    newRegroupementGroupCount: 3,
+    groupsByRegroupement: {},           // id -> { groups, timestamp }
 
     // Config spécifique Besoins
     selectedSubject: 'both',            // 'both' | 'maths' | 'french'
@@ -112,14 +105,23 @@
     selectedLanguage: 'ESP',            // 'ESP' | 'ITA' | autre
     availableLanguages: [],             // Langues détectées
 
-    // 🆕 Données brutes et mapping
+    // Données brutes et mapping
     classesData: {},                    // Dump brut du backend : { "6°1FIN": { eleves:[...] }, ... }
     classKeyMap: {},                    // Mapping affichage -> backend : { "6°1": "6°1FIN", ... }
 
     // Données
     students: [],                       // Tous les élèves des classes sélectionnées
     studentsById: new Map(),            // Map pour accès rapide
-    generatedGroups: [],                // Groupes générés
+    generatedGroups: [],                // Groupes générés pour le regroupement actif
+
+    // Persistance & offsets
+    persistMode: 'replace',             // 'replace' | 'continue'
+    tempOffsetStart: 1,
+    continuationData: null,
+    continuationLoading: false,
+    continuationError: null,
+    lastTempRange: null,
+    lastFinalRange: null,
 
     // UI
     modal: null,
@@ -131,13 +133,7 @@
     sortables: [],
 
     // Statistiques
-    showStatistics: true,
-
-    // Snapshots
-    snapshots: [],
-    snapshotLoading: false,
-    snapshotLoaded: false,
-    snapshotError: null
+    showStatistics: true
   };
 
   // ═══════════════════════════════════════════════════════════════
@@ -150,6 +146,16 @@
 
   function qsa(selector, scope = documentRef) {
     return Array.from(scope?.querySelectorAll(selector) || []);
+  }
+
+  function escapeHtml(value) {
+    if (typeof value !== 'string') return '';
+    return value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   function showToast(message, type = 'info', duration = 3500) {
@@ -186,30 +192,6 @@
     }
   }
 
-  function downloadBase64File(base64Data, fileName, mimeType) {
-    try {
-      const byteCharacters = atob(base64Data);
-      const byteNumbers = new Array(byteCharacters.length);
-      for (let i = 0; i < byteCharacters.length; i++) {
-        byteNumbers[i] = byteCharacters.charCodeAt(i);
-      }
-      const byteArray = new Uint8Array(byteNumbers);
-      const blob = new Blob([byteArray], { type: mimeType });
-      const url = URL.createObjectURL(blob);
-      const link = documentRef.createElement('a');
-      link.href = url;
-      link.download = fileName;
-      documentRef.body.appendChild(link);
-      link.click();
-      documentRef.body.removeChild(link);
-      URL.revokeObjectURL(url);
-      return true;
-    } catch (error) {
-      console.error('❌ Erreur downloadBase64File:', error);
-      return false;
-    }
-  }
-
   function formatDate(date) {
     return new Date(date).toLocaleString('fr-FR', {
       day: '2-digit',
@@ -220,453 +202,54 @@
     });
   }
 
-  function generatePassId() {
-    return `pass_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-  }
+  function normalizeStudentFromSheet(student, fallbackPrefix = 'eleve', fallbackIndex = 0) {
+    if (!student) return null;
 
-  function cloneStudent(student) {
-    if (!student || typeof student !== 'object') return student;
-    try {
-      return JSON.parse(JSON.stringify(student));
-    } catch (error) {
-      const clone = {};
-      Object.keys(student).forEach(key => {
-        const value = student[key];
-        clone[key] = (value && typeof value === 'object') ? cloneStudent(value) : value;
-      });
-      return clone;
-    }
-  }
-
-  function cloneGroupsData(groups) {
-    return (groups || []).map(group => ({
-      ...(group || {}),
-      students: (group?.students || []).map(cloneStudent)
-    }));
-  }
-
-  function applyOffsetToGroups(groups, offsetStart) {
-    const start = Number.isFinite(offsetStart) && offsetStart > 0 ? offsetStart : 1;
-    const defaultNamePattern = /^groupe\s+\d+(.*)$/i;
-
-    return (groups || []).map((group, index) => {
-      const newIndex = start + index;
-      const updated = {
-        ...(group || {}),
-        index: newIndex,
-        students: (group?.students || []).map(cloneStudent)
-      };
-
-      if (!group?.name || defaultNamePattern.test(group.name.trim())) {
-        const suffix = group?.name && defaultNamePattern.test(group.name.trim())
-          ? group.name.trim().replace(defaultNamePattern, '$1').trim()
-          : '';
-        updated.name = `Groupe ${newIndex}${suffix ? ` ${suffix}` : ''}`.trim();
-      }
-
-      return updated;
-    });
-  }
-
-  function getActivePass() {
-    if (!state.activePassId) return null;
-    return state.passes.find(pass => pass.id === state.activePassId) || null;
-  }
-
-  function syncStateFromPass(pass) {
-    if (!pass) return;
-
-    state.selectedClasses = Array.isArray(pass.classes) ? [...pass.classes] : [];
-    state.numGroups = typeof pass.numGroups === 'number' ? pass.numGroups : state.numGroups;
-    state.persistMode = pass.persistMode || 'continue';
-    state.tempOffsetStart = typeof pass.offsetStart === 'number' && pass.offsetStart > 0
-      ? pass.offsetStart
-      : Math.max(1, getSuggestedOffset());
-    state.generatedGroups = applyOffsetToGroups(pass.generatedGroups || [], state.tempOffsetStart);
-    state.lastTempRange = pass.lastTempRange || { start: null, end: null };
-    state.lastFinalRange = pass.lastFinalRange || { start: null, end: null };
-    state.lastTempSavedAt = pass.lastSavedAt || null;
-    state.lastFinalizedAt = pass.lastFinalizedAt || null;
-    state.lastGeneration = pass.lastGeneration || null;
-  }
-
-  function syncActivePassFromState() {
-    const activePass = getActivePass();
-    if (!activePass) return;
-
-    activePass.classes = [...state.selectedClasses];
-    activePass.numGroups = state.numGroups;
-    activePass.persistMode = state.persistMode;
-    activePass.offsetStart = state.tempOffsetStart;
-    activePass.generatedGroups = cloneGroupsData(state.generatedGroups);
-    activePass.lastTempRange = state.lastTempRange ? { ...state.lastTempRange } : { start: null, end: null };
-    activePass.lastFinalRange = state.lastFinalRange ? { ...state.lastFinalRange } : { start: null, end: null };
-    activePass.lastSavedAt = state.lastTempSavedAt || null;
-    activePass.lastFinalizedAt = state.lastFinalizedAt || null;
-    activePass.lastGeneration = state.lastGeneration;
-    activePass.updatedAt = new Date().toISOString();
-  }
-
-  function getSuggestedOffset() {
-    if (state.continuationStatus?.nextOffset) {
-      return state.continuationStatus.nextOffset;
-    }
-
-    const maxFromPasses = state.passes.reduce((max, pass) => {
-      const candidates = [
-        pass?.lastTempRange?.end || 0,
-        pass?.lastFinalRange?.end || 0,
-        ...(pass?.generatedGroups || []).map(g => g?.index || 0)
-      ];
-      const localMax = Math.max(...candidates, 0);
-      return Math.max(max, localMax);
-    }, 0);
-
-    return maxFromPasses > 0 ? maxFromPasses + 1 : 1;
-  }
-
-  function getCurrentOffsetEnd() {
-    if (!Array.isArray(state.generatedGroups) || state.generatedGroups.length === 0) {
-      return null;
-    }
-    return state.tempOffsetStart + state.generatedGroups.length - 1;
-  }
-
-  function setActivePass(passId) {
-    if (!passId) {
-      state.activePassId = null;
-      return;
-    }
-
-    const target = state.passes.find(pass => pass.id === passId);
-    if (!target) {
-      console.warn('[GroupsModule] Impossible de sélectionner le regroupement', passId);
-      return;
-    }
-
-    state.activePassId = passId;
-    state.newPassLabel = '';
-    syncStateFromPass(target);
-  }
-
-  function createPassFromSelection() {
-    const classes = [...state.selectedClasses];
-    if (classes.length === 0) {
-      showToast('Sélectionnez au moins une classe pour créer un regroupement', 'warning');
-      return null;
-    }
-
-    const label = (state.newPassLabel || '').trim() || `Regroupement ${state.passSequence}`;
-    state.passSequence += 1;
-
-    const offsetStart = state.tempOffsetStart || getSuggestedOffset();
-
-    const pass = {
-      id: generatePassId(),
-      name: label,
-      classes,
-      numGroups: state.numGroups,
-      persistMode: state.persistMode,
-      offsetStart,
-      generatedGroups: applyOffsetToGroups(state.generatedGroups || [], offsetStart),
-      lastTempRange: state.lastTempRange ? { ...state.lastTempRange } : { start: null, end: null },
-      lastFinalRange: state.lastFinalRange ? { ...state.lastFinalRange } : { start: null, end: null },
-      lastSavedAt: state.lastTempSavedAt || null,
-      lastFinalizedAt: state.lastFinalizedAt || null,
-      createdAt: new Date().toISOString(),
-      updatedAt: null,
-      lastCreatedTempSheets: []
+    const parseNumber = (value) => {
+      const parsed = parseFloat(value);
+      return Number.isFinite(parsed) ? parsed : null;
     };
 
-    state.passes.push(pass);
-    state.tempOffsetStart = offsetStart;
-    setActivePass(pass.id);
-    state.newPassLabel = '';
-    return pass;
-  }
+    const id = student.id
+      || student.ID
+      || student.ID_ELEVE
+      || student.IDELEVE
+      || student.identifiant
+      || `${fallbackPrefix}-${fallbackIndex}`;
 
-  function removePass(passId) {
-    const index = state.passes.findIndex(pass => pass.id === passId);
-    if (index === -1) return;
+    const nom = (student.nom || student.NOM || student.lastName || '').toString().trim();
+    const prenom = (student.prenom || student.PRENOM || student.firstName || '').toString().trim();
+    const sexe = (student.sexe || student.SEXE || student.gender || '').toString().trim().toUpperCase();
+    const classe = (student.classe || student.CLASSE || student.class || '').toString().trim();
+    const lv2 = (student.lv2 || student.LV2 || student.langue || '').toString().trim();
 
-    const [removed] = state.passes.splice(index, 1);
-    if (removed && removed.id === state.activePassId) {
-      state.activePassId = state.passes.length ? state.passes[0].id : null;
-      if (state.activePassId) {
-        syncStateFromPass(getActivePass());
-      } else {
-        state.selectedClasses = [];
-        state.generatedGroups = [];
-        state.numGroups = 3;
-        state.persistMode = 'continue';
-        state.tempOffsetStart = getSuggestedOffset();
-        state.lastTempRange = { start: null, end: null };
-        state.lastTempSavedAt = null;
-        state.lastFinalRange = { start: null, end: null };
-        state.lastFinalizedAt = null;
-        state.lastGeneration = null;
-      }
-    }
-  }
+    const partValue = parseNumber(student.part ?? student.PART ?? student.participation ?? student.PARTICIPATION);
+    const scoreFValue = parseNumber(student.scoreF ?? student.SCORE_F ?? student.SCOREF ?? student.MOY_FRANCAIS ?? student.MOY_FR ?? student.moyFr);
+    const scoreMValue = parseNumber(student.scoreM ?? student.SCORE_M ?? student.SCOREM ?? student.MOY_MATHS ?? student.MOY_M ?? student.moyMath);
+    const fallbackPart = parseNumber(student.scores?.PART);
+    const fallbackF = parseNumber(student.scores?.F);
+    const fallbackM = parseNumber(student.scores?.M);
 
-  function getPassCountForClass(classe) {
-    return state.passes.reduce((count, pass) => {
-      return count + (pass?.classes?.includes(classe) ? 1 : 0);
-    }, 0);
-  }
-
-  function sanitizeStudentForTransfer(student = {}) {
-    const scores = student.scores || {};
-    const normalizedScores = {
-      F: scores.F ?? student.scoreF ?? '',
-      M: scores.M ?? student.scoreM ?? '',
-      COM: scores.COM ?? student.com ?? '',
-      TRA: scores.TRA ?? student.tra ?? '',
-      PART: scores.PART ?? student.part ?? '',
-      ABS: scores.ABS ?? student.abs ?? ''
+    const scores = {
+      ...student.scores,
+      F: Number.isFinite(scoreFValue) ? scoreFValue : (Number.isFinite(fallbackF) ? fallbackF : 0),
+      M: Number.isFinite(scoreMValue) ? scoreMValue : (Number.isFinite(fallbackM) ? fallbackM : 0),
+      PART: Number.isFinite(partValue) ? partValue : (Number.isFinite(fallbackPart) ? fallbackPart : 0)
     };
 
-    return {
-      id: student.id || '',
-      nom: student.nom || '',
-      prenom: student.prenom || '',
-      sexe: student.sexe || '',
-      classe: student.classe || '',
-      lv2: student.lv2 || '',
-      opt: student.opt || '',
-      source: student.source || '',
-      scores: normalizedScores,
-      com: normalizedScores.COM,
-      tra: normalizedScores.TRA,
-      part: normalizedScores.PART,
-      abs: normalizedScores.ABS
-    };
-  }
-
-  function normalizeStudentStructure(student = {}) {
-    const sanitized = sanitizeStudentForTransfer(student);
     return {
       ...student,
-      ...sanitized,
-      scores: { ...sanitized.scores }
-    };
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  // 🆕 GROUPINGS UTILITIES (SPRINT #6)
-  // ═══════════════════════════════════════════════════════════════
-
-  /**
-   * Create a new grouping with unique ID
-   */
-  function createNewGrouping(label, classes, groupCount, description = '') {
-    const id = 'grp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-    const newGrouping = {
       id,
-      label: label || 'Regroupement ' + (state.groupings.length + 1),
-      classes: classes || [],
-      groupCount: groupCount || 3,
-      active: true,
-      description: description || ''
+      nom,
+      prenom,
+      sexe,
+      classe,
+      lv2,
+      part: scores.PART ?? 0,
+      scores,
+      scoreF: scores.F,
+      scoreM: scores.M
     };
-    state.groupings.push(newGrouping);
-    return newGrouping;
-  }
-
-  /**
-   * Get active grouping object
-   */
-  function getActiveGrouping() {
-    if (!state.activeGroupingId) return null;
-    return state.groupings.find(g => g.id === state.activeGroupingId);
-  }
-
-  /**
-   * Get active grouping ID (or implicit default if none)
-   */
-  function getEffectiveActiveGroupingId() {
-    if (state.useGroupings && state.activeGroupingId) {
-      return state.activeGroupingId;
-    }
-    return 'default';
-  }
-
-  /**
-   * Get classes for active grouping (or selected classes if no groupings)
-   */
-  function getEffectiveClasses() {
-    if (!state.useGroupings || !state.activeGroupingId) {
-      return state.selectedClasses;
-    }
-    const grouping = getActiveGrouping();
-    return grouping ? grouping.classes : state.selectedClasses;
-  }
-
-  /**
-   * Get group count for active grouping
-   */
-  function getEffectiveGroupCount() {
-    if (!state.useGroupings || !state.activeGroupingId) {
-      return state.numGroups;
-    }
-    const grouping = getActiveGrouping();
-    return grouping ? grouping.groupCount : state.numGroups;
-  }
-
-  /**
-   * Get effective groups array (per-grouping or global)
-   */
-  function getEffectiveGroups() {
-    if (!state.useGroupings || !state.activeGroupingId) {
-      return state.generatedGroups;
-    }
-    return state.groupingGroups[state.activeGroupingId] || [];
-  }
-
-  /**
-   * Set effective groups (per-grouping or global)
-   */
-  function setEffectiveGroups(groups) {
-    if (!state.useGroupings || !state.activeGroupingId) {
-      state.generatedGroups = groups;
-    } else {
-      state.groupingGroups[state.activeGroupingId] = groups;
-    }
-  }
-
-  /**
-   * Get config for active grouping (or global config if no groupings)
-   */
-  function getEffectiveConfig() {
-    if (!state.useGroupings || !state.activeGroupingId) {
-      return {
-        selectedSubject: state.selectedSubject,
-        distributionType: state.distributionType,
-        selectedLanguage: state.selectedLanguage
-      };
-    }
-    const groupingId = state.activeGroupingId;
-    return state.groupingConfig[groupingId] || {
-      selectedSubject: state.selectedSubject,
-      distributionType: state.distributionType,
-      selectedLanguage: state.selectedLanguage
-    };
-  }
-
-  /**
-   * Set config for active grouping
-   */
-  function setEffectiveConfig(config) {
-    if (!state.useGroupings || !state.activeGroupingId) {
-      state.selectedSubject = config.selectedSubject || state.selectedSubject;
-      state.distributionType = config.distributionType || state.distributionType;
-      state.selectedLanguage = config.selectedLanguage || state.selectedLanguage;
-    } else {
-      state.groupingConfig[state.activeGroupingId] = config;
-    }
-  }
-
-  /**
-   * Activate a grouping (switch view to that grouping)
-   */
-  function activateGrouping(groupingId) {
-    state.activeGroupingId = groupingId;
-    render(); // Re-render to show that grouping
-  }
-
-  /**
-   * Delete a grouping
-   */
-  function deleteGrouping(groupingId) {
-    state.groupings = state.groupings.filter(g => g.id !== groupingId);
-    delete state.groupingConfig[groupingId];
-    delete state.groupingGroups[groupingId];
-
-    // If we deleted the active one, switch to another
-    if (state.activeGroupingId === groupingId && state.groupings.length > 0) {
-      state.activeGroupingId = state.groupings[0].id;
-    } else if (state.groupings.length === 0) {
-      state.useGroupings = false;
-      state.activeGroupingId = null;
-    }
-  }
-
-  /**
-   * Toggle grouping active/inactive status
-   */
-  function toggleGroupingActive(groupingId) {
-    const grouping = state.groupings.find(g => g.id === groupingId);
-    if (grouping) {
-      grouping.active = !grouping.active;
-    }
-  }
-
-  /**
-   * Get list of active (enabled) groupings only
-   */
-  function getActiveGroupings() {
-    return state.groupings.filter(g => g.active);
-  }
-
-  /**
-   * Convert current state into a single implicit grouping
-   * (for backward compat when user doesn't use groupings)
-   */
-  function initializeSingleGrouping() {
-    if (state.groupings.length === 0 && state.useGroupings === false) {
-      // Create implicit single grouping from current selection
-      const grouping = {
-        id: 'default',
-        label: 'Défaut',
-        classes: state.selectedClasses,
-        groupCount: state.numGroups,
-        active: true,
-        description: 'Regroupement unique'
-      };
-      state.groupings = [grouping];
-      state.activeGroupingId = 'default';
-      state.useGroupings = false; // Still backward compat mode
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  //  NORMALISATION DES SCORES
-  // ═══════════════════════════════════════════════════════════════
-  // Fallback pour les scores manquants ou mal formatés
-  // Gère les trois formats : scores.F/M, scoreF/scoreM, SCORE_F/SCORE_M
-  function normalizeScores(student) {
-    if (!student) return student;
-
-    const toNum = v => (v === '' || v == null) ? null : Number(v);
-
-    // Chercher F (Français) dans les trois lieux possibles
-    const f = toNum(
-      student?.scores?.F ??
-      student?.scoreF ??
-      student?.SCORE_F ??
-      null
-    );
-
-    // Chercher M (Mathématiques) dans les trois lieux possibles
-    const m = toNum(
-      student?.scores?.M ??
-      student?.scoreM ??
-      student?.SCORE_M ??
-      null
-    );
-
-    // Garantir la structure scores.F/M
-    if (!student.scores) {
-      student.scores = {};
-    }
-    student.scores.F = Number.isFinite(f) ? f : null;
-    student.scores.M = Number.isFinite(m) ? m : null;
-
-    // Garder aussi les top-level pour compatibilité
-    student.scoreF = student.scores.F;
-    student.scoreM = student.scores.M;
-
-    return student;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -791,7 +374,6 @@
           const sexe = card.getAttribute('data-sexe') ||
                        card.querySelector('.tag-sex')?.textContent?.trim() ||
                        '';
-          const source = card.getAttribute('data-source') || ''; // classe d'origine
 
           snapshot[classId].eleves.push({
             id: sid,
@@ -799,7 +381,6 @@
             prenom,
             sexe,
             classe: classId,
-            source: source,
             scores: {} // pas idéal mais ça évite les crash
           });
         }
@@ -970,12 +551,6 @@
   // ═══════════════════════════════════════════════════════════════
 
   function renderStepContent() {
-    // 🆕 SPRINT #1 : Charger continuation metadata une seule fois au step 1
-    if (state.currentStep === 1 && !state.continuationLoaded) {
-      state.continuationLoaded = true;
-      loadContinuationIfNeeded();
-    }
-
     switch (state.currentStep) {
       case 1: return renderStep1_ChooseType();
       case 2: return renderStep2_SelectClasses();
@@ -1053,131 +628,8 @@
   }
 
   // ─────────────────────────────────────────────────────────────
-  //  ÉTAPE 2 : Définition des Regroupements (SPRINT #6)
+  //  ÉTAPE 2 : Sélection des classes
   // ─────────────────────────────────────────────────────────────
-
-  function renderContinuationBanner() {
-    if (state.isLoadingContinuation) {
-      return `
-        <div class="bg-slate-100 border border-slate-200 rounded-xl px-5 py-4 flex items-center gap-3">
-          <div class="spinner-small"></div>
-          <div>
-            <p class="text-sm font-semibold text-slate-700">Analyse des séries existantes...</p>
-            <p class="text-xs text-slate-500">Lecture des groupes déjà finalisés pour déterminer l'offset recommandé.</p>
-          </div>
-        </div>
-      `;
-    }
-
-    if (state.continuationStatusError) {
-      return `
-        <div class="bg-red-50 border border-red-200 rounded-xl px-5 py-4 flex items-start gap-3">
-          <i class="fas fa-circle-exclamation text-red-500 mt-1"></i>
-          <div>
-            <p class="text-sm font-semibold text-red-700">Impossible de lire l'état des groupes existants</p>
-            <p class="text-xs text-red-600">${state.continuationStatusError}</p>
-          </div>
-        </div>
-      `;
-    }
-
-    if (!state.continuationStatus) {
-      return '';
-    }
-
-    const status = state.continuationStatus;
-    const nextOffset = status.nextOffset || 1;
-    const lastFinal = status.lastFinalIndex ? `${status.prefix}${status.lastFinalIndex}` : 'Aucun groupe finalisé';
-    const tempCount = Array.isArray(status.tempSheets) ? status.tempSheets.length : 0;
-    const rangeStart = status.lastFinalizedRange?.start ? `${status.prefix}${status.lastFinalizedRange.start}` : null;
-    const rangeEnd = status.lastFinalizedRange?.end ? `${status.prefix}${status.lastFinalizedRange.end}` : null;
-    const finalizedAt = status.lastFinalizedAt ? formatDate(status.lastFinalizedAt) : null;
-
-    return `
-      <div class="bg-blue-50 border border-blue-200 rounded-2xl px-6 py-5 flex flex-col gap-2">
-        <div class="flex items-center justify-between gap-3">
-          <div class="flex items-center gap-3">
-            <i class="fas fa-route text-blue-600 text-xl"></i>
-            <div>
-              <p class="text-sm font-semibold text-blue-900">Mode ${state.groupType === 'needs' ? 'Groupes de besoins' : state.groupType === 'language' ? 'Groupes LV2' : 'Groupes options'}</p>
-              <p class="text-xs text-blue-700">Dernier groupe finalisé : <strong>${lastFinal}</strong> • Offset recommandé : <strong>${nextOffset}</strong></p>
-            </div>
-          </div>
-          ${tempCount > 0 ? `<span class="px-3 py-1 rounded-full bg-white border border-blue-200 text-xs text-blue-700 font-semibold">${tempCount} groupe(s) TEMP détecté(s)</span>` : ''}
-        </div>
-        ${(rangeStart || rangeEnd) ? `
-          <p class="text-xs text-blue-700">
-            Série finalisée la plus récente : ${rangeStart || '?'} → ${rangeEnd || '?'}${finalizedAt ? ` (${finalizedAt})` : ''}
-          </p>
-        ` : ''}
-      </div>
-    `;
-  }
-
-  function renderPassCard(pass, index) {
-    const isActive = pass.id === state.activePassId;
-    const nextEnd = pass.offsetStart && pass.numGroups ? pass.offsetStart + pass.numGroups - 1 : null;
-    const persistLabel = pass.persistMode === 'continue' ? 'Continuation' : 'Remplacement';
-    const persistIcon = pass.persistMode === 'continue' ? 'fa-layer-group' : 'fa-eraser';
-    const updated = pass.updatedAt || pass.createdAt;
-    const nextRangeLabel = pass.offsetStart ? `${pass.offsetStart}${nextEnd ? ` → ${nextEnd}` : ''}` : '—';
-    const lastTempRangeLabel = pass.lastTempRange?.start && pass.lastTempRange?.end
-      ? `${pass.lastTempRange.start} → ${pass.lastTempRange.end}`
-      : 'Aucune';
-    const lastTempSavedAt = pass.lastSavedAt ? formatDate(pass.lastSavedAt) : null;
-    const lastFinalRangeLabel = pass.lastFinalRange?.start && pass.lastFinalRange?.end
-      ? `${pass.lastFinalRange.start} → ${pass.lastFinalRange.end}`
-      : 'Aucune';
-    const lastFinalizedAt = pass.lastFinalizedAt ? formatDate(pass.lastFinalizedAt) : null;
-
-    return `
-      <div class="pass-card ${isActive ? 'active' : ''}" data-pass-id="${pass.id}">
-        <div class="pass-card__header">
-          <div class="flex items-center gap-3">
-            <span class="pass-badge">#${index + 1}</span>
-            <div>
-              <h4 class="pass-title">${pass.name}</h4>
-              <p class="pass-meta">${pass.classes.length} classe(s) • ${pass.numGroups} groupe(s) • MAJ ${updated ? formatDate(updated) : '—'}</p>
-            </div>
-          </div>
-          <div class="flex items-center gap-2 text-xs font-semibold text-blue-700">
-            <i class="fas ${persistIcon}"></i>
-            <span>${persistLabel}</span>
-          </div>
-        </div>
-        <div class="pass-card__body">
-          <div class="flex flex-wrap gap-2 mb-3">
-            ${pass.classes.map(cl => `<span class="pass-chip">${cl}</span>`).join('')}
-          </div>
-          <div class="pass-summary">
-            <div>
-              <p class="summary-label">Prochaine série</p>
-              <p class="summary-value">${nextRangeLabel}</p>
-              <span class="summary-hint">${pass.persistMode === 'continue' ? 'Ajout à la suite' : 'Remplacement complet'}</span>
-            </div>
-            <div>
-              <p class="summary-label">Sauvegarde TEMP</p>
-              <p class="summary-value">${lastTempRangeLabel}</p>
-              <span class="summary-hint">${lastTempSavedAt || 'Jamais'}</span>
-            </div>
-            <div>
-              <p class="summary-label">Finalisation</p>
-              <p class="summary-value">${lastFinalRangeLabel}</p>
-              <span class="summary-hint">${lastFinalizedAt || 'Jamais'}</span>
-            </div>
-          </div>
-        </div>
-        <div class="pass-card__footer">
-          <button type="button" class="pass-action ${isActive ? 'primary' : ''}" data-action="set-active-pass" data-pass-id="${pass.id}">
-            <i class="fas fa-compass"></i>Configurer
-          </button>
-          <button type="button" class="pass-action danger" data-action="delete-pass" data-pass-id="${pass.id}">
-            <i class="fas fa-trash"></i>Supprimer
-          </button>
-        </div>
-      </div>
-    `;
-  }
 
   function renderStep2_SelectClasses() {
     if (state.isLoading) {
@@ -1203,106 +655,486 @@
       `;
     }
 
-    const classCards = state.availableClasses.length === 0
-      ? `
-        <div class="col-span-full text-center py-8 text-slate-500">
-          <i class="fas fa-inbox text-4xl mb-3"></i>
-          <p>Aucune classe avec suffixe FIN trouvée</p>
-          <p class="text-sm mt-2">Vérifiez que vos onglets sont nommés correctement (ex: 6°1FIN)</p>
-        </div>
-      `
-      : state.availableClasses.map(classe => {
-          const isSelected = state.selectedClasses.includes(classe);
-          const assignedCount = getPassCountForClass(classe);
-          const badge = assignedCount > 0 ? `<span class="class-assignment">${assignedCount} regroupement(s)</span>` : '';
-          return `
-            <label class="class-checkbox-card ${isSelected ? 'selected' : ''}">
-              <input
-                type="checkbox"
-                class="class-checkbox"
-                value="${classe}"
-                ${isSelected ? 'checked' : ''}
-              >
-              <span class="class-name">${classe}</span>
-              ${badge}
-              <i class="fas fa-check check-icon"></i>
-            </label>
-          `;
-        }).join('');
+    const pendingSet = new Set(state.pendingClasses);
+    const pendingCount = pendingSet.size;
+    const nextLabel = state.newRegroupementLabel || `Regroupement ${state.regroupements.length + 1}`;
 
     return `
-      <div class="space-y-6 max-w-6xl mx-auto">
-        ${renderContinuationBanner()}
+      <div class="space-y-8">
+        <div class="text-center">
+          <h3 class="text-2xl font-bold text-slate-900 mb-2">Composez vos regroupements</h3>
+          <p class="text-slate-600">Sélectionnez les classes à associer puis enregistrez une passe par regroupement.</p>
+        </div>
 
-        <div class="grid lg:grid-cols-[1.6fr_1fr] gap-6">
-          <div class="bg-slate-50 rounded-2xl p-6 border border-slate-200 flex flex-col gap-5">
-            <div class="flex items-center justify-between gap-3">
-              <div>
-                <h3 class="text-xl font-bold text-slate-900">1. Sélectionnez les classes</h3>
-                <p class="text-sm text-slate-600">Composez un regroupement (une "passe") de classes à répartir ensemble.</p>
-              </div>
-              <span class="px-3 py-1 rounded-full bg-white border border-slate-200 text-xs text-slate-600 font-semibold">
-                ${state.selectedClasses.length} classe(s) sélectionnée(s)
+        <div class="grid gap-6 xl:grid-cols-[280px_minmax(0,1fr)] 2xl:grid-cols-[320px_minmax(0,1fr)] items-start">
+          <section class="bg-slate-50 border border-slate-200 rounded-2xl p-6">
+            <div class="flex items-center justify-between mb-4">
+              <span class="text-sm font-semibold text-slate-700">
+                <i class="fas fa-layer-group mr-2"></i>${pendingCount} classe(s) sélectionnée(s)
               </span>
-            </div>
-
-            <div class="flex flex-wrap gap-2">
-              <button type="button" class="px-4 py-2 rounded-lg bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors border border-slate-200" data-action="select-all-classes">
-                Tout sélectionner
-              </button>
-              <button type="button" class="px-4 py-2 rounded-lg bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors border border-slate-200" data-action="deselect-all-classes">
-                Tout désélectionner
-              </button>
-            </div>
-
-            <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
-              ${classCards}
-            </div>
-
-            <div class="bg-white border border-slate-200 rounded-xl p-4">
-              <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-                <div class="flex-1">
-                  <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1" for="pass-name-input">Nom du regroupement</label>
-                  <input id="pass-name-input" type="text" class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500" placeholder="Ex : Regroupement 6°1-6°2" value="${state.newPassLabel || ''}" data-input="pass-name">
-                </div>
-                <div class="flex items-end gap-3">
-                  <button type="button" class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold transition-colors" data-action="create-pass">
-                    <i class="fas fa-plus mr-2"></i>Créer le regroupement
-                  </button>
-                </div>
+              <div class="flex gap-2">
+                <button type="button" class="px-4 py-2 rounded-lg bg-white hover:bg-slate-100 text-slate-700 text-sm font-medium transition-colors border border-slate-200" data-action="select-all-classes">
+                  Tout sélectionner
+                </button>
+                <button type="button" class="px-4 py-2 rounded-lg bg-white hover:bg-slate-100 text-slate-700 text-sm font-medium transition-colors border border-slate-200" data-action="deselect-all-classes">
+                  Tout désélectionner
+                </button>
               </div>
-              <p class="text-xs text-slate-500 mt-3">
-                Chaque regroupement correspond à une passe. Vous pourrez générer et sauvegarder les groupes pour chaque passe sans écraser les précédentes.
-              </p>
             </div>
-          </div>
 
-          <div class="space-y-4">
-            <div class="bg-white border border-slate-200 rounded-2xl p-5 h-full flex flex-col">
+            <div class="space-y-2 max-h-[420px] overflow-y-auto pr-1">
+              ${state.availableClasses.length === 0 ? `
+                <div class="text-center py-10 text-slate-500 border border-dashed border-slate-300 rounded-xl">
+                  <i class="fas fa-inbox text-4xl mb-3"></i>
+                  <p>Aucune classe avec suffixe FIN trouvée</p>
+                  <p class="text-sm mt-2">Vérifiez que vos onglets sont nommés correctement (ex: 6°1FIN)</p>
+                </div>
+              ` : state.availableClasses.map(classe => {
+                  const checked = pendingSet.has(classe);
+                  return `
+                    <label class="class-checkbox-card ${checked ? 'selected' : ''}">
+                      <input type="checkbox" class="class-checkbox" value="${classe}" ${checked ? 'checked' : ''}>
+                      <span class="class-name">${classe}</span>
+                      <i class="fas fa-check check-icon"></i>
+                    </label>
+                  `;
+                }).join('')}
+            </div>
+          </section>
+
+          <section class="space-y-6">
+            <div class="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
+              <div class="flex items-start justify-between gap-3 mb-4">
+                <div>
+                  <h4 class="text-lg font-semibold text-slate-900">Nouvelle passe</h4>
+                  <p class="text-sm text-slate-600">Les classes cochées seront regroupées et généreront ${state.newRegroupementGroupCount} groupe(s).</p>
+                </div>
+                <span class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-100 text-xs font-semibold text-slate-600">
+                  <i class="fas fa-hashtag text-indigo-500"></i>${pendingCount} classe(s)
+                </span>
+              </div>
+
+              <div class="space-y-4">
+                <div>
+                  <label class="block text-sm font-semibold text-slate-700 mb-1" for="reg-label-input">Libellé du regroupement</label>
+                  <input id="reg-label-input" type="text" class="w-full rounded-xl border border-slate-300 focus:border-indigo-500 focus:ring-indigo-500 px-4 py-2 text-sm" data-input="new-pass-label" value="${escapeHtml(nextLabel)}" placeholder="ex. Passe 1 - 6ème A/B">
+                </div>
+
+                <div class="flex items-center gap-3">
+                  <div class="flex-1">
+                    <label class="block text-sm font-semibold text-slate-700 mb-1">Nombre de groupes</label>
+                    <div class="flex items-center gap-2">
+                      <button type="button" class="number-btn" data-action="decrement-new-pass">
+                        <i class="fas fa-minus"></i>
+                      </button>
+                      <span class="number-display" data-display="new-pass-count">${state.newRegroupementGroupCount}</span>
+                      <button type="button" class="number-btn" data-action="increment-new-pass">
+                        <i class="fas fa-plus"></i>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="text-xs text-slate-500 bg-slate-100 rounded-xl px-3 py-2">
+                  ${pendingCount > 0
+                    ? `Classes sélectionnées : <span class="font-semibold text-slate-700">${Array.from(pendingSet).join(', ')}</span>`
+                    : 'Sélectionnez des classes dans la colonne de gauche pour composer un regroupement.'}
+                </div>
+
+                <button type="button" class="px-5 py-2.5 rounded-xl ${pendingCount === 0 ? 'bg-slate-200 text-slate-500 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700 text-white'} font-semibold transition-colors" data-action="create-regroupement" ${pendingCount === 0 ? 'disabled' : ''}>
+                  <i class="fas fa-plus mr-2"></i>Ajouter ce regroupement
+                </button>
+              </div>
+            </div>
+
+            <div class="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
               <div class="flex items-center justify-between mb-4">
                 <div>
-                  <h3 class="text-lg font-semibold text-slate-900">2. Vos regroupements</h3>
-                  <p class="text-xs text-slate-600">Sélectionnez un regroupement pour le configurer (offset, nombre de groupes, etc.).</p>
+                  <h4 class="text-lg font-semibold text-slate-900">Regroupements définis</h4>
+                  <p class="text-sm text-slate-600">Activez un regroupement pour le configurer et générer ses groupes.</p>
                 </div>
-                <span class="text-xs font-semibold text-slate-500 uppercase tracking-wide">${state.passes.length} regroupement(s)</span>
+                <span class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-100 text-xs font-semibold text-slate-600">
+                  <i class="fas fa-layer-group text-indigo-500"></i>${state.regroupements.length}
+                </span>
               </div>
 
-              <div class="flex-1 overflow-y-auto space-y-3 pr-1">
-                ${state.passes.length === 0 ? `
-                  <div class="empty-pass-card">
-                    <i class="fas fa-layer-group text-2xl text-slate-400 mb-2"></i>
-                    <p class="text-sm text-slate-600 mb-2 font-semibold">Aucun regroupement défini</p>
-                    <p class="text-xs text-slate-500">
-                      Sélectionnez des classes puis cliquez sur « Créer le regroupement » pour planifier votre première passe.
-                    </p>
-                  </div>
-                ` : state.passes.map((pass, idx) => renderPassCard(pass, idx)).join('')}
-              </div>
+              ${renderRegroupementList()}
             </div>
+          </section>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderRegroupementList() {
+    if (!Array.isArray(state.regroupements) || state.regroupements.length === 0) {
+      return `
+        <div class="p-5 bg-slate-50 border border-dashed border-slate-300 rounded-xl text-sm text-slate-500 text-center">
+          <p class="font-semibold mb-1">Aucun regroupement enregistré</p>
+          <p>Ajoutez un regroupement en sélectionnant des classes puis en cliquant sur «&nbsp;Ajouter ce regroupement&nbsp;».</p>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="space-y-3">
+        ${state.regroupements.map((reg, index) => renderRegroupementCard(reg, index)).join('')}
+      </div>
+    `;
+  }
+
+  function renderRegroupementCard(reg, index) {
+    const isActive = state.activeRegroupementId === reg.id;
+    const modeLabel = reg.persistMode === 'continue' ? 'Continuation' : 'Remplacement';
+    const hasRange = reg.offsetStart && reg.offsetEnd;
+    const rangeLabel = hasRange
+      ? `Groupes ${reg.offsetStart} → ${reg.offsetEnd}`
+      : 'Pas encore numéroté';
+    const tempLabel = reg.lastTempRange
+      ? `TEMP ${reg.lastTempRange.start} → ${reg.lastTempRange.end}`
+      : '';
+    const finalLabel = reg.lastFinalRange
+      ? `Finalisé ${reg.lastFinalRange.start} → ${reg.lastFinalRange.end}`
+      : '';
+
+    return `
+      <div class="border ${isActive ? 'border-indigo-500 bg-indigo-50/70' : 'border-slate-200 bg-white'} rounded-xl p-4 transition-all">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <p class="text-xs uppercase font-semibold text-slate-500 tracking-wide mb-1">Regroupement ${index + 1}</p>
+            <h4 class="text-base font-semibold text-slate-900">${escapeHtml(reg.label || `Regroupement ${index + 1}`)}</h4>
+            <p class="text-sm text-slate-600 mt-1">${Array.isArray(reg.classes) && reg.classes.length ? reg.classes.join(', ') : '—'}</p>
+            <p class="text-xs text-slate-500 mt-1">${reg.groupCount || 0} groupe(s) • ${Array.isArray(reg.classes) ? reg.classes.length : 0} classe(s)</p>
+            <div class="mt-3 flex flex-wrap gap-2 text-xs text-slate-600">
+              <span class="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-slate-100 font-semibold">
+                <i class="fas fa-layer-group text-indigo-500"></i>${modeLabel}
+              </span>
+              <span class="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-slate-100">
+                <i class="fas fa-hashtag text-slate-500"></i>${rangeLabel}
+              </span>
+              ${tempLabel ? `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-blue-50 text-blue-700"><i class="fas fa-floppy-disk"></i>${tempLabel}</span>` : ''}
+              ${finalLabel ? `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-50 text-green-700"><i class="fas fa-check-circle"></i>${finalLabel}</span>` : ''}
+            </div>
+          </div>
+          <div class="flex flex-col gap-2 items-end text-sm font-semibold">
+            <button type="button" class="px-3 py-1.5 rounded-lg ${isActive ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}" data-action="activate-regroupement" data-regroupement-id="${reg.id}">
+              ${isActive ? '<i class="fas fa-eye mr-1"></i>Actif' : '<i class="fas fa-eye mr-1"></i>Afficher'}
+            </button>
+            <button type="button" class="px-3 py-1.5 rounded-lg bg-white border border-red-200 text-red-600 hover:bg-red-50" data-action="delete-regroupement" data-regroupement-id="${reg.id}">
+              <i class="fas fa-trash mr-1"></i>Supprimer
+            </button>
           </div>
         </div>
       </div>
     `;
+  }
+
+  function getActiveRegroupement() {
+    if (!Array.isArray(state.regroupements) || state.regroupements.length === 0) {
+      return null;
+    }
+    if (state.activeRegroupementId) {
+      const match = state.regroupements.find(reg => reg.id === state.activeRegroupementId);
+      if (match) {
+        return match;
+      }
+    }
+    return state.regroupements[0] || null;
+  }
+
+  // ✅ BLOCKER #3 FIX: Helpers pour accéder aux valeurs per-regroupement avec fallback au global
+  function getEffectivePersistMode() {
+    const regroupement = getActiveRegroupement();
+    return regroupement?.persistMode || state.persistMode || 'replace';
+  }
+
+  function getEffectiveOffsetStart() {
+    const regroupement = getActiveRegroupement();
+    return regroupement?.offsetStart || state.tempOffsetStart || 1;
+  }
+
+  function getEffectiveOffsetEnd() {
+    const regroupement = getActiveRegroupement();
+    return regroupement?.offsetEnd || null;
+  }
+
+  function getEffectiveLastTempRange() {
+    const regroupement = getActiveRegroupement();
+    return regroupement?.lastTempRange || state.lastTempRange || null;
+  }
+
+  function getEffectiveLastFinalRange() {
+    const regroupement = getActiveRegroupement();
+    return regroupement?.lastFinalRange || state.lastFinalRange || null;
+  }
+
+  function getRegroupementStatus() {
+    const regroupement = getActiveRegroupement();
+    if (!regroupement) return null;
+
+    const mode = getEffectivePersistMode();
+    const offsetStart = getEffectiveOffsetStart();
+    const offsetEnd = getEffectiveOffsetEnd();
+    const lastTemp = getEffectiveLastTempRange();
+    const lastFinal = getEffectiveLastFinalRange();
+
+    return {
+      regroupement: regroupement,
+      mode: mode,
+      offsetStart: offsetStart,
+      offsetEnd: offsetEnd,
+      lastTemp: lastTemp,
+      lastFinal: lastFinal,
+      hasTempSheets: !!lastTemp,
+      hasFinalSheets: !!lastFinal,
+      description: `${escapeHtml(regroupement.label || 'Regroupement')}: ${regroupement.classes?.join('+') || '—'} → ${regroupement.groupCount || 0} groupes`
+    };
+  }
+
+  // ✅ BLOCKER #3 FIX: Afficher plus de contexte sur la passe actuelle
+  function renderActiveRegroupementSummary() {
+    const regroupement = getActiveRegroupement();
+    if (!regroupement) {
+      return `
+        <div class="bg-amber-50 border border-amber-200 rounded-2xl px-5 py-4 mb-6 text-sm text-amber-800 flex items-center gap-3">
+          <i class="fas fa-circle-info text-amber-600 text-lg"></i>
+          <div>
+            <p class="font-semibold">Aucun regroupement actif</p>
+            <p>Retournez à l'étape 2 pour ajouter des classes et créer une première passe.</p>
+          </div>
+        </div>
+      `;
+    }
+
+    const classesList = Array.isArray(regroupement.classes) && regroupement.classes.length
+      ? regroupement.classes.join(', ')
+      : '—';
+    const offsetStart = getEffectiveOffsetStart();
+    const offsetEnd = getEffectiveOffsetEnd();
+    const range = offsetStart && offsetEnd
+      ? `Groupes ${offsetStart} → ${offsetEnd}`
+      : 'Non numéroté';
+    const persistMode = getEffectivePersistMode();
+    const lastFinal = getEffectiveLastFinalRange();
+
+    // Contexte pédagogique: expliquer quelle passe on est en train de faire
+    let passContext = '';
+    if (lastFinal && persistMode === 'continue') {
+      passContext = `<p class="text-xs text-indigo-600 mt-1">📊 Cette passe continue après les groupes 1-${lastFinal.end}</p>`;
+    } else if (persistMode === 'replace' && lastFinal) {
+      passContext = `<p class="text-xs text-indigo-600 mt-1">🔄 Cette passe remplacera les groupes précédents (${lastFinal.start}-${lastFinal.end})</p>`;
+    }
+
+    return `
+      <div class="bg-indigo-50 border border-indigo-200 rounded-2xl px-5 py-4 mb-6 flex flex-wrap items-center justify-between gap-4 text-sm text-indigo-900">
+        <div>
+          <p class="text-xs uppercase tracking-wide font-semibold text-indigo-600">Regroupement actif</p>
+          <p class="text-lg font-semibold text-indigo-900">${escapeHtml(regroupement.label || 'Regroupement')}</p>
+          <p class="text-sm text-indigo-700">${classesList}</p>
+          ${passContext}
+        </div>
+        <div class="flex items-center gap-3 text-xs">
+          <span class="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-white border border-indigo-200 font-semibold">
+            <i class="fas fa-layer-group text-indigo-500"></i>${regroupement.groupCount || 0} groupe(s)
+          </span>
+          <span class="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-white border border-indigo-200">
+            <i class="fas fa-hashtag text-indigo-500"></i>${range}
+          </span>
+          <span class="inline-flex items-center gap-1 px-3 py-1 rounded-full ${persistMode === 'continue' ? 'bg-blue-100 border-blue-300' : 'bg-white border-indigo-200'}">
+            <i class="fas fa-repeat text-indigo-500"></i>${persistMode === 'continue' ? 'Continuation' : 'Remplacement'}
+          </span>
+        </div>
+      </div>
+    `;
+  }
+
+  function createRegroupementFromSelection() {
+    const classes = Array.from(new Set(state.pendingClasses));
+    if (classes.length === 0) {
+      showToast('Sélectionnez au moins une classe pour créer un regroupement', 'warning');
+      return;
+    }
+
+    const label = (state.newRegroupementLabel || '').trim() || `Regroupement ${state.regroupements.length + 1}`;
+    const groupCount = Math.max(1, state.newRegroupementGroupCount || state.numGroups || 1);
+    const persistMode = state.regroupements.length === 0 ? 'replace' : 'continue';
+    const suggestedOffset = persistMode === 'replace'
+      ? 1
+      : (state.continuationData?.suggestedNextIndex || state.tempOffsetStart || 1);
+
+    const regroupement = {
+      id: `reg-${Date.now()}`,
+      label,
+      classes,
+      groupCount,
+      persistMode,
+      offsetStart: suggestedOffset,
+      offsetEnd: null,
+      lastTempRange: null,
+      lastFinalRange: null
+    };
+
+    state.regroupements.push(regroupement);
+    state.pendingClasses = [];
+    state.newRegroupementLabel = '';
+    state.newRegroupementGroupCount = groupCount;
+    state.activeRegroupementId = regroupement.id;
+    syncActiveRegroupementState();
+    updateUI();
+  }
+
+  function deleteRegroupement(regroupementId) {
+    if (!regroupementId) return;
+    state.regroupements = state.regroupements.filter(reg => reg.id !== regroupementId);
+    if (state.groupsByRegroupement) {
+      delete state.groupsByRegroupement[regroupementId];
+    }
+    if (state.activeRegroupementId === regroupementId) {
+      state.activeRegroupementId = state.regroupements.length ? state.regroupements[0].id : null;
+    }
+    syncActiveRegroupementState();
+    updateUI();
+  }
+
+  function activateRegroupement(regroupementId) {
+    if (!regroupementId || state.activeRegroupementId === regroupementId) return;
+    state.activeRegroupementId = regroupementId;
+    syncActiveRegroupementState();
+    updateUI();
+  }
+
+  function syncActiveRegroupementState() {
+    const regroupement = getActiveRegroupement();
+    if (!regroupement) {
+      state.selectedClasses = [];
+      state.numGroups = 3;
+      state.persistMode = 'replace';
+      state.tempOffsetStart = 1;
+      state.generatedGroups = [];
+      return;
+    }
+
+    state.selectedClasses = [...regroupement.classes];
+    state.numGroups = regroupement.groupCount || state.numGroups || 3;
+    state.persistMode = regroupement.persistMode || state.persistMode || 'replace';
+    state.tempOffsetStart = regroupement.offsetStart || (state.persistMode === 'continue' ? (state.continuationData?.suggestedNextIndex || 1) : 1);
+
+    const stored = state.groupsByRegroupement?.[regroupement.id];
+    if (stored && Array.isArray(stored.groups)) {
+      state.generatedGroups = stored.groups.map(group => ({
+        ...group,
+        students: group.students.map(student => ({ ...student }))
+      }));
+    } else {
+      state.generatedGroups = [];
+    }
+
+    applyOffsetToGeneratedGroups();
+  }
+
+  function updateNewRegroupementCount(delta) {
+    state.newRegroupementGroupCount = Math.max(1, Math.min(12, (state.newRegroupementGroupCount || 1) + delta));
+    updateUI();
+  }
+
+  function updateActiveRegroupementGroupCount(value) {
+    const regroupement = getActiveRegroupement();
+    if (regroupement) {
+      regroupement.groupCount = value;
+    }
+  }
+
+  function setPersistMode(mode) {
+    const normalized = mode === 'continue' ? 'continue' : 'replace';
+    if (state.persistMode === normalized) return;
+    state.persistMode = normalized;
+    const regroupement = getActiveRegroupement();
+    if (regroupement) {
+      regroupement.persistMode = normalized;
+    }
+
+    if (normalized === 'replace') {
+      state.tempOffsetStart = 1;
+    } else {
+      const suggestion = state.continuationData?.suggestedNextIndex
+        || (regroupement?.offsetEnd ? regroupement.offsetEnd + 1 : null)
+        || state.tempOffsetStart
+        || 1;
+      state.tempOffsetStart = Math.max(1, suggestion);
+    }
+
+    applyOffsetToGeneratedGroups();
+    updateUI();
+  }
+
+  function handleOffsetInput(e) {
+    const value = parseInt(e.target.value, 10);
+    if (!Number.isFinite(value) || value < 1) {
+      return;
+    }
+    state.tempOffsetStart = value;
+    const regroupement = getActiveRegroupement();
+    if (regroupement) {
+      regroupement.offsetStart = value;
+      if (state.generatedGroups.length > 0) {
+        regroupement.offsetEnd = value + state.generatedGroups.length - 1;
+      }
+    }
+    applyOffsetToGeneratedGroups();
+    updateUI();
+  }
+
+  function applyOffsetToGeneratedGroups() {
+    if (!Array.isArray(state.generatedGroups) || state.generatedGroups.length === 0) return;
+
+    const base = Number(state.tempOffsetStart) || 1;
+
+    state.generatedGroups.forEach((group, idx) => {
+      const existing = Number(group.index);
+      const index = Number.isFinite(existing) && existing > 0 ? existing : base + idx;
+      group.index = index;
+      group.name = `Groupe ${index}`;
+    });
+
+    storeGeneratedGroupsForActiveRegroupement();
+  }
+
+  function storeGeneratedGroupsForActiveRegroupement() {
+    const regroupement = getActiveRegroupement();
+    if (!regroupement) return;
+    if (!state.groupsByRegroupement) state.groupsByRegroupement = {};
+
+    state.groupsByRegroupement[regroupement.id] = {
+      groups: state.generatedGroups.map(group => ({
+        ...group,
+        students: group.students.map(student => ({ ...student }))
+      })),
+      updatedAt: new Date().toISOString()
+    };
+
+    regroupement.groupCount = state.generatedGroups.length || regroupement.groupCount || state.numGroups;
+    regroupement.persistMode = state.persistMode;
+
+    if (state.generatedGroups.length > 0) {
+      const indexes = state.generatedGroups
+        .map(group => Number(group.index))
+        .filter(idx => Number.isFinite(idx) && idx > 0);
+
+      if (indexes.length > 0) {
+        const minIndex = Math.min(...indexes);
+        const maxIndex = Math.max(...indexes);
+        regroupement.offsetStart = minIndex;
+        regroupement.offsetEnd = maxIndex;
+
+        if (state.persistMode === 'replace') {
+          state.tempOffsetStart = minIndex;
+        }
+      } else {
+        const fallbackStart = state.tempOffsetStart || regroupement.offsetStart || 1;
+        regroupement.offsetStart = fallbackStart;
+        regroupement.offsetEnd = fallbackStart + state.generatedGroups.length - 1;
+      }
+    }
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -1310,56 +1142,17 @@
   // ─────────────────────────────────────────────────────────────
 
   function renderStep3_Configure() {
-    const activePass = getActivePass();
-
-    if (!activePass) {
-      return `
-        <div class="max-w-3xl mx-auto text-center py-16">
-          <i class="fas fa-layer-group text-5xl text-slate-300 mb-6"></i>
-          <h3 class="text-2xl font-semibold text-slate-800 mb-3">Aucun regroupement sélectionné</h3>
-          <p class="text-slate-600 mb-6">Revenez à l'étape précédente pour créer ou sélectionner un regroupement de classes. Chaque configuration s'applique à un regroupement précis.</p>
-          <div class="flex justify-center">
-            <button type="button" class="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold" data-action="previous-step">
-              <i class="fas fa-arrow-left mr-2"></i>Retour aux regroupements
-            </button>
-          </div>
-        </div>
-      `;
-    }
-
     const isNeeds = state.groupType === 'needs';
     const isLanguage = state.groupType === 'language';
-    const offsetEnd = state.tempOffsetStart && state.numGroups ? state.tempOffsetStart + state.numGroups - 1 : null;
-
-    const persistModes = [
-      {
-        id: 'continue',
-        label: 'Ajouter à la série existante',
-        description: 'Conserve les groupes précédents et numérote automatiquement les nouveaux à la suite.',
-        icon: 'fa-layer-group'
-      },
-      {
-        id: 'replace',
-        label: 'Remplacer la série',
-        description: 'Purge les anciens groupes TEMP/finalisés pour repartir de zéro.',
-        icon: 'fa-broom'
-      }
-    ];
 
     return `
       <div class="max-w-3xl mx-auto">
         <div class="text-center mb-8">
           <h3 class="text-2xl font-bold text-slate-900 mb-3">Configuration des groupes</h3>
-          <p class="text-slate-600">Définissez les paramètres pour <strong>${activePass.name}</strong> (${activePass.classes.join(', ')})</p>
+          <p class="text-slate-600">Définissez les paramètres de génération</p>
         </div>
 
-        <div class="bg-indigo-50 border border-indigo-200 rounded-2xl p-5 mb-6 flex items-start gap-3">
-          <i class="fas fa-info-circle text-indigo-500 text-lg mt-1"></i>
-          <div class="text-sm text-indigo-900">
-            <p class="font-semibold">Numérotation actuelle : ${state.tempOffsetStart}${offsetEnd ? ` → ${offsetEnd}` : ''}</p>
-            <p class="text-xs mt-1">Ce regroupement utilise le mode <strong>${state.persistMode === 'continue' ? 'Continuation' : 'Remplacement'}</strong>. Ajustez le point de départ si vous souhaitez poursuivre une série existante.</p>
-          </div>
-        </div>
+        ${renderActiveRegroupementSummary()}
 
         <div class="config-card mb-6">
           <div class="config-header">
@@ -1490,62 +1283,6 @@
             </div>
           </div>
         ` : ''}
-
-        <div class="config-card">
-          <div class="config-header">
-            <i class="fas fa-route text-2xl text-amber-600"></i>
-            <div>
-              <h4 class="font-semibold text-slate-900">Workflow multi-passes</h4>
-              <p class="text-sm text-slate-600">Choisissez comment sauvegarder ce regroupement et définissez la numérotation.</p>
-            </div>
-          </div>
-          <div class="config-body space-y-5">
-            <div class="grid sm:grid-cols-2 gap-3">
-              ${persistModes.map(mode => `
-                <label class="radio-card ${state.persistMode === mode.id ? 'selected' : ''}" data-persist-mode="${mode.id}">
-                  <div class="flex items-start gap-3">
-                    <input
-                      type="radio"
-                      name="persistMode"
-                      value="${mode.id}"
-                      ${state.persistMode === mode.id ? 'checked' : ''}
-                    >
-                    <div class="flex-1">
-                      <div class="flex items-center gap-2">
-                        <i class="fas ${mode.icon} text-sm"></i>
-                        <span class="font-medium">${mode.label}</span>
-                      </div>
-                      <p class="text-xs text-slate-500 mt-1">${mode.description}</p>
-                    </div>
-                    <i class="fas fa-check-circle check-icon"></i>
-                  </div>
-                </label>
-              `).join('')}
-            </div>
-
-            <div class="bg-slate-50 border border-slate-200 rounded-xl p-4">
-              <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2" for="offset-start-input">Numérotation des groupes</label>
-              <div class="flex flex-col md:flex-row md:items-center md:gap-4">
-                <div class="flex items-center gap-3">
-                  <span class="text-sm text-slate-600">Commencer à</span>
-                  <input
-                    id="offset-start-input"
-                    type="number"
-                    min="1"
-                    class="w-24 rounded-lg border border-slate-200 px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
-                    value="${state.tempOffsetStart}"
-                    data-input="offset-start"
-                  >
-                  <span class="text-sm text-slate-500">→ ${offsetEnd ? offsetEnd : '...'}</span>
-                </div>
-                <div class="mt-3 md:mt-0 text-xs text-slate-500">
-                  <p>Utilisez ce réglage pour poursuivre une série existante (ex : commencer à 4 pour ajouter Groupe 4, 5, ...).</p>
-                  ${state.continuationStatus?.nextOffset ? `<p class="mt-1">Offset suggéré : <strong>${state.continuationStatus.nextOffset}</strong></p>` : ''}
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
       </div>
     `;
   }
@@ -1555,19 +1292,7 @@
   // ─────────────────────────────────────────────────────────────
 
   function renderStep4_Preview() {
-    const activePass = getActivePass();
-    if (!activePass) {
-      return `
-        <div class="max-w-4xl mx-auto text-center py-16">
-          <i class="fas fa-route text-5xl text-slate-300 mb-6"></i>
-          <h3 class="text-2xl font-semibold text-slate-800 mb-3">Aucun regroupement sélectionné</h3>
-          <p class="text-slate-600">Revenez à l'étape précédente pour choisir un regroupement avant de lancer la génération.</p>
-        </div>
-      `;
-    }
-
     const config = getConfigSummary();
-    const offsetEnd = state.tempOffsetStart && state.numGroups ? state.tempOffsetStart + state.numGroups - 1 : null;
 
     return `
       <div class="max-w-4xl mx-auto">
@@ -1577,17 +1302,6 @@
         </div>
 
         <div class="grid md:grid-cols-2 gap-6 mb-8">
-          <div class="summary-card">
-            <div class="summary-icon bg-gradient-to-br from-sky-500 to-indigo-500">
-              <i class="fas fa-sitemap"></i>
-            </div>
-            <div class="flex-1">
-              <p class="summary-label">Regroupement</p>
-              <p class="summary-value">${activePass.name}</p>
-              <p class="text-xs text-slate-500 mt-1">${activePass.classes.join(', ')}</p>
-            </div>
-          </div>
-
           <div class="summary-card">
             <div class="summary-icon ${GROUP_TYPES[state.groupType].color}">
               ${GROUP_TYPES[state.groupType].icon}
@@ -1620,17 +1334,6 @@
                   <span class="px-3 py-1 bg-slate-100 text-slate-700 rounded-lg text-sm font-medium">${c}</span>
                 `).join('')}
               </div>
-            </div>
-          </div>
-
-          <div class="summary-card md:col-span-2">
-            <div class="summary-icon bg-gradient-to-br from-amber-500 to-orange-500">
-              <i class="fas fa-hashtag"></i>
-            </div>
-            <div class="flex-1">
-              <p class="summary-label">Workflow & numérotation</p>
-              <p class="summary-value">${state.persistMode === 'continue' ? 'Ajout à la série existante' : 'Remplacement complet'}</p>
-              <p class="text-xs text-slate-500 mt-1">Groupes ${state.tempOffsetStart}${offsetEnd ? ` → ${offsetEnd}` : ''}</p>
             </div>
           </div>
 
@@ -1735,14 +1438,14 @@
   // ─────────────────────────────────────────────────────────────
 
   function renderStep5_Groups() {
-    const activePass = getActivePass();
+    const regroupement = getActiveRegroupement();
 
     if (state.isLoading) {
       return `
         <div class="flex flex-col items-center justify-center py-20">
           <div class="spinner-large mb-6"></div>
           <p class="text-lg text-slate-600 font-semibold">Génération des groupes en cours...</p>
-          <p class="text-sm text-slate-500 mt-2">L'algorithme optimise la répartition</p>
+          <p class="text-sm text-slate-500 mt-2">L'algorithme équilibre les élèves selon vos critères.</p>
           <div class="mt-6 flex items-center gap-2 text-xs text-slate-400">
             <div class="w-2 h-2 bg-indigo-500 rounded-full animate-pulse"></div>
             <div class="w-2 h-2 bg-purple-500 rounded-full animate-pulse delay-100"></div>
@@ -1752,150 +1455,201 @@
       `;
     }
 
-    if (!activePass) {
+    if (!regroupement) {
       return `
-        <div class="flex flex-col items-center justify-center py-20">
-          <i class="fas fa-layer-group text-6xl text-slate-300 mb-6"></i>
-          <p class="text-lg text-slate-600">Aucun regroupement actif</p>
-          <p class="text-sm text-slate-500 mt-2">Revenez aux étapes précédentes pour sélectionner un regroupement avant de manipuler les groupes.</p>
+        <div class="flex flex-col items-center justify-center py-20 text-center">
+          <i class="fas fa-layer-group text-5xl text-slate-300 mb-4"></i>
+          <p class="text-lg text-slate-600 font-semibold mb-2">Aucun regroupement actif</p>
+          <p class="text-sm text-slate-500 max-w-md">Revenez à l'étape 2 pour sélectionner des classes et créer au moins un regroupement avant de générer les groupes.</p>
         </div>
       `;
     }
 
     if (!state.generatedGroups || state.generatedGroups.length === 0) {
       return `
-        <div class="flex flex-col items-center justify-center py-20">
-          <i class="fas fa-inbox text-6xl text-slate-300 mb-6"></i>
-          <p class="text-lg text-slate-600">Aucun groupe généré</p>
-          <button type="button" class="mt-6 px-6 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold transition-colors" data-action="regenerate">
-            <i class="fas fa-rotate-right mr-2"></i>Générer maintenant
-          </button>
+        <div class="space-y-6">
+          ${renderActiveRegroupementSummary()}
+          ${renderRegroupementTabs()}
+          ${renderPersistenceControls(regroupement)}
+          <div class="bg-white border border-slate-200 rounded-2xl p-10 text-center text-slate-500">
+            <i class="fas fa-inbox text-5xl mb-4"></i>
+            <p class="text-lg font-semibold text-slate-700 mb-2">Aucun groupe généré</p>
+            <p class="text-sm mb-6">Lancez la génération pour créer les groupes de ce regroupement.</p>
+            <button type="button" class="px-6 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold transition-colors" data-action="regenerate">
+              <i class="fas fa-rotate-right mr-2"></i>Générer maintenant
+            </button>
+          </div>
         </div>
       `;
     }
 
-    const currentOffsetEnd = getCurrentOffsetEnd();
-    const plannedRangeLabel = state.tempOffsetStart && currentOffsetEnd
-      ? `${state.tempOffsetStart} → ${currentOffsetEnd}`
-      : '—';
-    const lastTempRangeLabel = state.lastTempRange?.start && state.lastTempRange?.end
-      ? `${state.lastTempRange.start} → ${state.lastTempRange.end}`
-      : 'Aucune';
-    const lastTempDateLabel = state.lastTempSavedAt ? formatDate(state.lastTempSavedAt) : null;
-    const lastFinalRangeLabel = state.lastFinalRange?.start && state.lastFinalRange?.end
-      ? `${state.lastFinalRange.start} → ${state.lastFinalRange.end}`
-      : 'Aucune';
-    const lastFinalDateLabel = state.lastFinalizedAt ? formatDate(state.lastFinalizedAt) : null;
-    const persistLabel = state.persistMode === 'continue' ? 'Continuation' : 'Remplacement';
-
     return `
-      <div>
-        <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-6">
-          <div class="space-y-1">
-            <h3 class="text-2xl font-bold text-slate-900">Groupes – ${activePass.name}</h3>
-            <p class="text-sm text-slate-600">${state.generatedGroups.length} groupe(s) • ${getTotalStudents()} élèves</p>
-            <div class="meta-chip-group">
-              <span class="meta-chip"><i class="fas fa-layer-group"></i>${persistLabel}</span>
-              <span class="meta-chip"><i class="fas fa-sort-numeric-up"></i>Numérotation prévue&nbsp;: ${plannedRangeLabel}</span>
-              <span class="meta-chip"><i class="fas fa-save"></i>Dernière sauvegarde TEMP&nbsp;: ${lastTempRangeLabel}${lastTempDateLabel ? `<span class="meta-chip__hint">(${lastTempDateLabel})</span>` : ''}</span>
-              <span class="meta-chip"><i class="fas fa-check-double"></i>Dernière finalisation&nbsp;: ${lastFinalRangeLabel}${lastFinalDateLabel ? `<span class="meta-chip__hint">(${lastFinalDateLabel})</span>` : ''}</span>
-            </div>
-          </div>
-          <div class="flex flex-wrap items-center gap-3">
-            <label class="text-xs font-semibold text-slate-500 uppercase tracking-wide" for="active-pass-select">Regroupement</label>
-            <select id="active-pass-select" class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500" data-input="active-pass-select">
-              ${state.passes.map(pass => `<option value="${pass.id}" ${pass.id === state.activePassId ? 'selected' : ''}>${pass.name}</option>`).join('')}
-            </select>
-            <button type="button" class="action-btn bg-slate-100 hover:bg-slate-200 text-slate-700" data-action="go-to-step-2">
-              <i class="fas fa-sitemap"></i>
-              Gérer les passes
-            </button>
-          </div>
-        </div>
+      <div class="space-y-6">
+        ${renderActiveRegroupementSummary()}
+        ${renderRegroupementTabs()}
+        ${renderPersistenceControls(regroupement)}
+        ${renderActionToolbar()}
 
-        <div class="grid gap-3 lg:grid-cols-2 xl:grid-cols-[1.3fr_1fr] mb-5">
-          <div class="flex flex-wrap gap-2">
-            <button type="button" class="action-btn bg-slate-100 hover:bg-slate-200 text-slate-700" data-action="regenerate">
-              <i class="fas fa-rotate-right"></i>
-              Régénérer
-            </button>
-            <button type="button" class="action-btn bg-orange-600 hover:bg-orange-700 text-white" data-action="save-temp-groups">
-              <i class="fas fa-save"></i>
-              Sauvegarder TEMP
-            </button>
-            <button type="button" class="action-btn bg-green-600 hover:bg-green-700 text-white" data-action="finalize-temp-groups">
-              <i class="fas fa-check-circle"></i>
-              Finaliser
-            </button>
-            <button type="button" class="action-btn bg-yellow-100 hover:bg-yellow-200 text-yellow-700" data-action="load-temp-groups">
-              <i class="fas fa-download"></i>
-              Charger TEMP
-            </button>
-          </div>
-          <div class="flex flex-wrap gap-2">
-            <button type="button" class="action-btn ${state.showStatistics ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'} hover:bg-indigo-700" data-action="toggle-statistics">
-              <i class="fas fa-chart-bar"></i>
-              Statistiques
-            </button>
-            <button type="button" class="action-btn bg-blue-100 hover:bg-blue-200 text-blue-700" data-action="export-pdf">
-              <i class="fas fa-file-pdf"></i>
-              Export PDF
-            </button>
-            <button type="button" class="action-btn bg-green-100 hover:bg-green-200 text-green-700" data-action="export-csv">
-              <i class="fas fa-file-csv"></i>
-              Export CSV
-            </button>
-            <button type="button" class="action-btn bg-slate-100 hover:bg-slate-200 text-slate-700" data-action="create-snapshot">
-              <i class="fas fa-camera"></i>
-              Snapshot
-            </button>
-            <button type="button" class="action-btn bg-slate-100 hover:bg-slate-200 text-slate-700" data-action="refresh-snapshots">
-              <i class="fas fa-rotate"></i>
-              Historique
-            </button>
-          </div>
-        </div>
-
-        ${renderSnapshotHistory()}
-
-        <div class="flex flex-col lg:flex-row gap-6">
-          <div class="flex-1">
+        <div class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)] items-start">
+          <div>
             <div class="grid ${state.showStatistics ? 'md:grid-cols-2 xl:grid-cols-3' : 'md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5'} gap-4" id="groups-container">
               ${state.generatedGroups.map((group, index) => renderGroupCard(group, index)).join('')}
             </div>
-          `}
+          </div>
+
+          ${state.showStatistics ? `<div class="w-full max-w-[360px]">${renderStatisticsPanel()}</div>` : ''}
         </div>
 
-        <!-- Info fixe en bas -->
-        <div class="flex-shrink-0 mt-6 bg-indigo-50 border border-indigo-200 rounded-xl p-4 flex items-start gap-3">
+        <div class="mt-6 bg-indigo-50 border border-indigo-200 rounded-xl p-4 flex items-start gap-3">
           <i class="fas fa-hand-pointer text-indigo-600 text-xl mt-0.5"></i>
           <div class="text-sm text-indigo-900">
             <p class="font-semibold mb-1">Glisser-déposer activé :</p>
-            <p>Vous pouvez réorganiser les élèves en les déplaçant d'un groupe à l'autre. Les statistiques se mettent à jour automatiquement.</p>
+            <p>Rééquilibrez vos groupes en déplaçant les élèves. Les statistiques et l'ordre sont mis à jour instantanément.</p>
           </div>
         </div>
       </div>
     `;
   }
 
+  function renderRegroupementTabs() {
+    if (!Array.isArray(state.regroupements) || state.regroupements.length <= 1) {
+      return '';
+    }
+
+    return `
+      <div class="flex flex-wrap gap-2">
+        ${state.regroupements.map((reg, index) => {
+          const isActive = state.activeRegroupementId === reg.id;
+          return `
+            <button type="button" class="px-4 py-2 rounded-full text-sm font-semibold border ${isActive ? 'bg-indigo-600 text-white border-indigo-600 shadow-md' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-100'}" data-action="activate-regroupement" data-regroupement-id="${reg.id}">
+              <i class="fas fa-layer-group mr-1"></i>${escapeHtml(reg.label || `Regroupement ${index + 1}`)}
+            </button>
+          `;
+        }).join('')}
+      </div>
+    `;
+  }
+
+  // ✅ BLOCKER #3 FIX: Utiliser les helpers per-regroupement
+  function renderPersistenceControls(regroupement) {
+    const offsetValue = getEffectiveOffsetStart();
+    const persistMode = getEffectivePersistMode();
+    const lastTemp = getEffectiveLastTempRange();
+    const lastFinal = getEffectiveLastFinalRange();
+
+    // Context banner pour expliquer le mode actuel
+    let contextBanner = '';
+    if (persistMode === 'continue' && lastFinal) {
+      contextBanner = `
+        <div class="mb-4 bg-blue-50 border border-blue-200 rounded-xl p-3 text-sm text-blue-900 flex items-start gap-2">
+          <i class="fas fa-info-circle text-blue-600 mt-0.5 flex-shrink-0"></i>
+          <div>
+            <p class="font-semibold mb-1">Mode Continuation activé</p>
+            <p class="text-xs">Les groupes continueront à partir du numéro ${lastFinal.end + 1} (après les groupes finalisés précédents).</p>
+          </div>
+        </div>
+      `;
+    } else if (persistMode === 'replace' && lastFinal) {
+      contextBanner = `
+        <div class="mb-4 bg-amber-50 border border-amber-200 rounded-xl p-3 text-sm text-amber-900 flex items-start gap-2">
+          <i class="fas fa-warning text-amber-600 mt-0.5 flex-shrink-0"></i>
+          <div>
+            <p class="font-semibold mb-1">Mode Remplacement activé</p>
+            <p class="text-xs">Les groupes remplaceront les onglets finalisés précédents de ce regroupement (${lastFinal.start}-${lastFinal.end}).</p>
+          </div>
+        </div>
+      `;
+    }
+
+    return `
+      ${contextBanner}
+      <div class="bg-white border border-slate-200 rounded-2xl px-5 py-4 shadow-sm">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="flex items-center gap-2">
+            <button type="button" class="px-4 py-2 rounded-xl text-sm font-semibold border ${persistMode === 'replace' ? 'bg-indigo-600 text-white border-indigo-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-100'}" data-action="set-persist-mode" data-value="replace">
+              <i class="fas fa-repeat mr-1"></i>Remplacer
+            </button>
+            <button type="button" class="px-4 py-2 rounded-xl text-sm font-semibold border ${persistMode === 'continue' ? 'bg-indigo-600 text-white border-indigo-600 shadow' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-100'}" data-action="set-persist-mode" data-value="continue">
+              <i class="fas fa-layer-group mr-1"></i>Continuer
+            </button>
+          </div>
+
+          <div class="flex items-center gap-2 text-sm">
+            <label class="font-semibold text-slate-700" for="offset-input">Numéro de départ</label>
+            <input id="offset-input" type="number" min="1" class="w-24 rounded-lg border border-slate-300 px-3 py-1.5 text-sm focus:border-indigo-500 focus:ring-indigo-500" data-input="offset-start" value="${offsetValue}">
+          </div>
+
+          <div class="flex flex-col gap-1 text-xs text-slate-500">
+            ${lastTemp ? `<span><i class="fas fa-floppy-disk mr-1 text-slate-400"></i>TEMP ${lastTemp.start} → ${lastTemp.end}</span>` : ''}
+            ${lastFinal ? `<span><i class="fas fa-check-circle mr-1 text-slate-400"></i>Final ${lastFinal.start} → ${lastFinal.end}</span>` : ''}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderActionToolbar() {
+    return `
+      <div class="grid gap-3 md:grid-cols-3">
+        <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+          <p class="text-xs uppercase font-semibold text-slate-500 mb-2">Calcul & aperçu</p>
+          <div class="flex flex-wrap gap-2">
+            <button type="button" class="action-btn ${state.showStatistics ? 'bg-indigo-600 text-white' : 'bg-white border border-indigo-200 text-indigo-600'}" data-action="toggle-statistics">
+              <i class="fas fa-chart-bar"></i>
+              Statistiques
+            </button>
+            <button type="button" class="action-btn bg-white border border-slate-200 text-slate-700" data-action="regenerate">
+              <i class="fas fa-rotate-right"></i>
+              Régénérer
+            </button>
+          </div>
+        </div>
+
+        <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+          <p class="text-xs uppercase font-semibold text-slate-500 mb-2">Sauvegardes</p>
+          <div class="flex flex-wrap gap-2">
+            <button type="button" class="action-btn bg-white border border-slate-200 text-slate-700" data-action="load-temp-groups">
+              <i class="fas fa-download"></i>
+              Charger
+            </button>
+            <button type="button" class="action-btn bg-orange-500/90 hover:bg-orange-600 text-white" data-action="save-temp-groups">
+              <i class="fas fa-save"></i>
+              Sauver TEMP
+            </button>
+            <button type="button" class="action-btn bg-green-600 hover:bg-green-700 text-white" data-action="finalize-temp-groups">
+              <i class="fas fa-check-circle"></i>
+              Finaliser
+            </button>
+          </div>
+        </div>
+
+        <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+          <p class="text-xs uppercase font-semibold text-slate-500 mb-2">Exports</p>
+          <div class="flex flex-wrap gap-2">
+            <button type="button" class="action-btn bg-white border border-slate-200 text-slate-700" data-action="export-pdf">
+              <i class="fas fa-file-pdf"></i>
+              Export PDF
+            </button>
+            <button type="button" class="action-btn bg-white border border-slate-200 text-slate-700" data-action="export-csv">
+              <i class="fas fa-file-csv"></i>
+              Export CSV
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // ✅ BLOCKER #3 FIX: Utiliser offset effectif per-regroupement
   function renderGroupCard(group, index) {
     const stats = calculateGroupStats(group);
-    const displayIndex = typeof group.index === 'number' ? group.index : (state.tempOffsetStart || 1) + index;
-    const displayName = group.name || `Groupe ${displayIndex}`;
-
-    // 🆕 SPRINT #6: Afficher le vrai numéro du groupe (en tenant compte de l'offset)
-    const groupNumber = state.tempOffsetStart + index;
-    const groupPrefix = getGroupPrefix();
-    const groupName = `${groupPrefix}${groupNumber}`;
-    const groupLabel = group.name || groupName;
-
-    // 🆕 Contexte: passe/regroupement actif
-    const groupingContext = state.activeGroupingId ? `${state.activeGroupingId}` : 'Par défaut';
+    const offsetStart = getEffectiveOffsetStart();
+    const groupNumber = offsetStart + index;
 
     return `
       <div class="group-card" data-group-index="${index}">
         <div class="group-header ${GROUP_TYPES[state.groupType].color}">
-          <h4 class="group-title">${displayName}</h4>
+          <h4 class="group-title">${group.name || `Groupe ${groupNumber}`}</h4>
           <span class="group-count">${group.students.length} élèves</span>
         </div>
 
@@ -1925,88 +1679,20 @@
     `;
   }
 
-  function renderSnapshotHistory() {
-    if (!state.groupType) return '';
-
-    const isAppsScriptAvailable = Boolean(google?.script?.run);
-    const subtitle = GROUP_TYPES[state.groupType]?.title || 'Groupes';
-    const content = !isAppsScriptAvailable
-      ? `<p class="text-sm text-slate-500">Historique disponible uniquement dans Google Sheets (Apps Script).</p>`
-      : state.snapshotLoading
-        ? `<div class="text-sm text-slate-600 flex items-center gap-2"><span class="inline-block w-3 h-3 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></span>Chargement des snapshots...</div>`
-        : state.snapshotError
-          ? `<p class="text-sm text-red-600">${state.snapshotError}</p>`
-          : state.snapshots.length === 0
-            ? `<p class="text-sm text-slate-500">Aucun snapshot enregistré pour le moment. Créez un premier instantané pour conserver une version de référence.</p>`
-            : `<ul class="space-y-3">${state.snapshots.map(renderSnapshotListItem).join('')}</ul>`;
-
-    return `
-      <div class="mt-6">
-        <div class="bg-white border border-slate-200 rounded-2xl p-4">
-          <div class="flex items-center justify-between gap-3">
-            <div>
-              <h4 class="text-base font-semibold text-slate-900 flex items-center gap-2">
-                <i class="fas fa-clock-rotate-left text-indigo-600"></i>
-                Historique des versions (${subtitle})
-              </h4>
-              <p class="text-xs text-slate-500 mt-1">Les 5 dernières captures conservées côté Apps Script.</p>
-            </div>
-            <div class="flex items-center gap-2">
-              <button type="button" class="action-btn bg-slate-100 hover:bg-slate-200 text-slate-700" data-action="refresh-snapshots" ${!isAppsScriptAvailable ? 'disabled' : ''}>
-                <i class="fas fa-rotate"></i>
-                Actualiser
-              </button>
-            </div>
-          </div>
-          <div class="mt-4">
-            ${content}
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  function renderSnapshotListItem(snapshot) {
-    const classes = Array.isArray(snapshot.metadata?.selectedClasses)
-      ? snapshot.metadata.selectedClasses.join(', ')
-      : (snapshot.metadata?.selectedClasses || '—');
-    const distribution = snapshot.metadata?.distributionLabel || snapshot.metadata?.distributionType || '';
-    const disabledAttr = state.snapshotLoading ? 'disabled' : '';
-
-    return `
-      <li class="flex items-center justify-between gap-4 bg-slate-50 border border-slate-200 rounded-xl p-3">
-        <div class="min-w-0">
-          <p class="font-semibold text-slate-900 truncate">${formatDate(snapshot.timestamp)}</p>
-          <p class="text-xs text-slate-500 mt-1 truncate">${snapshot.groupCount || 0} groupe(s) • Classes : ${classes}</p>
-          ${distribution ? `<p class=\"text-xs text-slate-400 mt-1 truncate\">${distribution}</p>` : ''}
-        </div>
-        <button type="button" class="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold transition" data-action="restore-snapshot" data-snapshot-id="${snapshot.snapshotId}" ${disabledAttr}>
-          <i class="fas fa-rotate-left mr-1"></i>Restaurer
-        </button>
-      </li>
-    `;
-  }
-
   function renderStudentCard(student) {
     const nomAffiche = simplifierNomComplet(student.nom, student.prenom);
 
-    // Déterminer si l'élève a un score COM = 1 (besoin d'attention)
-    const comScore = student.scores?.COM ?? student.com ?? 0;
-    const isComRed = comScore === 1;
-    const nameClass = isComRed ? 'text-red-600 font-semibold' : '';
-
     return `
-      <div class="student-card" data-student-id="${student.id}" data-source="${student.source || ''}">
-        <span class="student-sexe ${student.sexe === 'F' ? 'sexe-f' : 'sexe-m'}" title="${student.sexe}">${student.sexe || '?'}</span>
-        <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.125rem;">
-          <p class="student-name ${nameClass}" title="${nomAffiche}">${nomAffiche}</p>
-          <div style="display: flex; gap: 0.25rem; font-size: 0.65rem; color: #64748b;">
-            <span title="Classe FIN">${student.classe || '—'}</span>
-            ${student.source ? `<span title="Classe origine">| ${student.source}</span>` : ''}
+      <div class="student-card" data-student-id="${student.id}">
+        <div class="flex items-center gap-2 flex-1">
+          <span class="student-sexe ${student.sexe === 'F' ? 'sexe-f' : 'sexe-m'}">${student.sexe || '?'}</span>
+          <div class="flex-1 min-w-0">
+            <p class="student-name">${nomAffiche}</p>
+            <p class="student-meta">${student.classe || '—'}</p>
           </div>
         </div>
         ${renderStudentScores(student)}
-        <i class="fas fa-grip-vertical text-slate-300 drag-handle" style="flex-shrink: 0; font-size: 0.7rem;"></i>
+        <i class="fas fa-grip-vertical text-slate-300 drag-handle"></i>
       </div>
     `;
   }
@@ -2063,23 +1749,14 @@
     return state.generatedGroups.reduce((sum, group) => sum + group.students.length, 0);
   }
 
-  function getGroupPrefix() {
-    const prefixes = {
-      'needs': 'grBe',
-      'language': 'grLV',
-      'option': 'grOpt'
-    };
-    return prefixes[state.groupType] || 'gr';
-  }
-
   // ═══════════════════════════════════════════════════════════════
   //  PANNEAU STATISTIQUES
   // ═══════════════════════════════════════════════════════════════
 
   function renderStatisticsPanel() {
     return `
-      <div class="statistics-panel w-full lg:w-1/3 max-w-sm">
-        <div class="bg-white rounded-2xl border-2 border-slate-200 overflow-hidden lg:sticky lg:top-4">
+      <div class="statistics-panel">
+        <div class="bg-white rounded-2xl border-2 border-slate-200 overflow-hidden sticky top-4">
           <div class="bg-gradient-to-br from-indigo-600 to-purple-600 text-white p-4">
             <h4 class="font-bold text-lg flex items-center gap-2">
               <i class="fas fa-chart-pie"></i>
@@ -2099,14 +1776,12 @@
   function renderGroupStatistics(group, index) {
     const stats = calculateGroupStats(group);
     const scoreDistribution = calculateScoreDistribution(group);
-    const displayIndex = typeof group.index === 'number' ? group.index : (state.tempOffsetStart || 1) + index;
-    const displayName = group.name || `Groupe ${displayIndex}`;
 
     return `
       <div class="mb-4 last:mb-0">
         <div class="bg-slate-50 rounded-xl p-3 border border-slate-200">
           <div class="flex items-center justify-between mb-3">
-            <h5 class="font-semibold text-slate-900">${displayName}</h5>
+            <h5 class="font-semibold text-slate-900">${group.name || `Groupe ${index + 1}`}</h5>
             <span class="text-xs bg-slate-200 text-slate-700 px-2 py-1 rounded-full font-medium">${group.students.length}</span>
           </div>
 
@@ -2234,281 +1909,6 @@
     `;
   }
 
-  // ═══════════════════════════════════════════════════════════════
-  //  SPRINT #3 : STATISTIQUES & DASHBOARD
-  // ═══════════════════════════════════════════════════════════════
-
-  /**
-   * Calcule les statistiques complètes des groupes générés
-   * Retourne : {byGroup: [...], global: {...}, alerts: [...]}
-   */
-  function calculateStatistics() {
-    if (!Array.isArray(state.generatedGroups) || state.generatedGroups.length === 0) {
-      return { byGroup: [], global: {}, alerts: [] };
-    }
-
-    const stats = {
-      byGroup: [],
-      global: {}
-    };
-
-    // 🔢 STATS PAR GROUPE
-    state.generatedGroups.forEach((group, idx) => {
-      const students = group.students || [];
-      const count = students.length;
-
-      // Scores
-      const scores = students.map(s => {
-        const needScore = getNeedScoreForStudent(s);
-        return Number.isFinite(needScore) ? needScore : 0;
-      });
-      const avgScore = count > 0 ? scores.reduce((a, b) => a + b, 0) / count : 0;
-      const scoreStdDev = count > 1
-        ? Math.sqrt(scores.reduce((sum, s) => sum + Math.pow(s - avgScore, 2), 0) / count)
-        : 0;
-
-      // Parité F/M
-      const girls = students.filter(s => (s.sexe || '').toUpperCase() === 'F').length;
-      const boys = students.filter(s => (s.sexe || '').toUpperCase() === 'M').length;
-
-      // Comportements
-      const comScores = students.map(s => Number(s.com ?? 0));
-      const avgCOM = count > 0 ? comScores.reduce((a, b) => a + b, 0) / count : 0;
-
-      const traScores = students.map(s => Number(s.tra ?? 0));
-      const avgTRA = count > 0 ? traScores.reduce((a, b) => a + b, 0) / count : 0;
-
-      const partScores = students.map(s => Number(s.part ?? 0));
-      const avgPART = count > 0 ? partScores.reduce((a, b) => a + b, 0) / count : 0;
-
-      const absScores = students.map(s => Number(s.abs ?? 0));
-      const avgABS = count > 0 ? absScores.reduce((a, b) => a + b, 0) / count : 0;
-
-      // Source (classe d'origine)
-      const sources = {};
-      students.forEach(s => {
-        const src = s.source || 'Inconnu';
-        sources[src] = (sources[src] || 0) + 1;
-      });
-
-      stats.byGroup.push({
-        idx: idx,
-        name: `Groupe ${state.tempOffsetStart + idx}`,
-        count: count,
-        avgScore: parseFloat(avgScore.toFixed(2)),
-        scoreStdDev: parseFloat(scoreStdDev.toFixed(2)),
-        girls: girls,
-        boys: boys,
-        parityRatio: count > 0 ? (girls / count * 100).toFixed(1) + '%' : '0%',
-        avgCOM: parseFloat(avgCOM.toFixed(2)),
-        avgTRA: parseFloat(avgTRA.toFixed(2)),
-        avgPART: parseFloat(avgPART.toFixed(2)),
-        avgABS: parseFloat(avgABS.toFixed(2)),
-        sources: sources
-      });
-    });
-
-    // 🌍 STATS GLOBALES
-    const sizes = stats.byGroup.map(g => g.count);
-    const avgScores = stats.byGroup.map(g => g.avgScore);
-    const allGirls = stats.byGroup.reduce((s, g) => s + g.girls, 0);
-    const allBoys = stats.byGroup.reduce((s, g) => s + g.boys, 0);
-
-    const meanSize = sizes.reduce((a, b) => a + b, 0) / sizes.length;
-    const meanScore = avgScores.reduce((a, b) => a + b, 0) / avgScores.length;
-
-    stats.global.totalStudents = sizes.reduce((a, b) => a + b, 0);
-    stats.global.numGroups = state.generatedGroups.length;
-    stats.global.avgGroupSize = parseFloat(meanSize.toFixed(2));
-    stats.global.sizeStdDev = Math.sqrt(sizes.reduce((sum, s) => sum + Math.pow(s - meanSize, 2), 0) / sizes.length);
-    stats.global.sizeStdDev = parseFloat(stats.global.sizeStdDev.toFixed(2));
-
-    stats.global.avgScore = parseFloat(meanScore.toFixed(2));
-    stats.global.scoreStdDev = Math.sqrt(avgScores.reduce((sum, s) => sum + Math.pow(s - meanScore, 2), 0) / avgScores.length);
-    stats.global.scoreStdDev = parseFloat(stats.global.scoreStdDev.toFixed(2));
-
-    stats.global.totalGirls = allGirls;
-    stats.global.totalBoys = allBoys;
-    stats.global.globalParityPercent = allGirls + allBoys > 0 ? (allGirls / (allGirls + allBoys) * 100).toFixed(1) : '0';
-
-    // 🚨 ALERTES
-    stats.alerts = [];
-
-    // Alerte 1 : Écart de taille trop grand
-    if (stats.global.sizeStdDev > 2) {
-      stats.alerts.push({
-        level: 'warning',
-        icon: '⚠️',
-        message: `Groupes déséquilibrés en taille (écart-type: ${stats.global.sizeStdDev}). Max écart: ${Math.max(...sizes) - Math.min(...sizes)} élèves`
-      });
-    }
-
-    // Alerte 2 : Écart de score trop grand
-    if (stats.global.scoreStdDev > 1.5) {
-      stats.alerts.push({
-        level: 'warning',
-        icon: '📊',
-        message: `Groupes déséquilibrés en niveau académique (écart-type: ${stats.global.scoreStdDev}). Écart score moyen: ${(Math.max(...avgScores) - Math.min(...avgScores)).toFixed(2)}`
-      });
-    }
-
-    // Alerte 3 : Parité déséquilibrée
-    const parityDiff = Math.abs(allGirls - allBoys);
-    if (parityDiff > 5) {
-      stats.alerts.push({
-        level: 'warning',
-        icon: '👥',
-        message: `Parité F/M déséquilibrée (${allGirls}F / ${allBoys}M, écart: ${parityDiff})`
-      });
-    }
-
-    // Alerte 4 : Un groupe avec beaucoup plus de filles/garçons
-    stats.byGroup.forEach(g => {
-      if (g.count > 0) {
-        const parityPercent = (g.girls / g.count) * 100;
-        if (parityPercent < 30 || parityPercent > 70) {
-          stats.alerts.push({
-            level: 'info',
-            icon: '👤',
-            message: `${g.name} : parité ${(100 - parityPercent).toFixed(0)}M / ${parityPercent.toFixed(0)}F (déséquilibré)`
-          });
-        }
-      }
-    });
-
-    // Alerte 5 : Comportement très dégradé
-    const avgGlobalCOM = stats.byGroup.reduce((s, g) => s + g.avgCOM, 0) / stats.byGroup.length;
-    const avgGlobalABS = stats.byGroup.reduce((s, g) => s + g.avgABS, 0) / stats.byGroup.length;
-    if (avgGlobalCOM < 2) {
-      stats.alerts.push({
-        level: 'info',
-        icon: '⚠️',
-        message: `Comportement moyen très bas (${avgGlobalCOM.toFixed(2)}/5). Vérifiez les données`
-      });
-    }
-
-    console.log('[GroupsModule] 📊 Stats calculées:', stats);
-    return stats;
-  }
-
-  /**
-   * Affiche le dashboard de statistiques
-   */
-  function renderStatisticsPanel() {
-    const stats = calculateStatistics();
-
-    if (stats.byGroup.length === 0) {
-      return `
-        <div class="p-6 bg-amber-50 border border-amber-200 rounded-lg">
-          <p class="text-amber-900 font-semibold">📊 Pas de groupes générés encore</p>
-          <p class="text-amber-800 text-sm mt-2">Générez les groupes d'abord pour voir les statistiques</p>
-        </div>
-      `;
-    }
-
-    return `
-      <div class="space-y-6">
-        <!-- MÉTRIQUES GLOBALES -->
-        <div class="grid md:grid-cols-4 gap-4">
-          <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
-            <p class="text-sm text-blue-700 font-semibold">Total Élèves</p>
-            <p class="text-2xl font-bold text-blue-900">${stats.global.totalStudents}</p>
-            <p class="text-xs text-blue-600 mt-1">dans ${stats.global.numGroups} groupes</p>
-          </div>
-
-          <div class="bg-purple-50 border border-purple-200 rounded-lg p-4">
-            <p class="text-sm text-purple-700 font-semibold">Taille Moyenne</p>
-            <p class="text-2xl font-bold text-purple-900">${stats.global.avgGroupSize}</p>
-            <p class="text-xs text-purple-600 mt-1">σ: ${stats.global.sizeStdDev}</p>
-          </div>
-
-          <div class="bg-green-50 border border-green-200 rounded-lg p-4">
-            <p class="text-sm text-green-700 font-semibold">Niveau Moyen</p>
-            <p class="text-2xl font-bold text-green-900">${stats.global.avgScore}</p>
-            <p class="text-xs text-green-600 mt-1">σ: ${stats.global.scoreStdDev}</p>
-          </div>
-
-          <div class="bg-pink-50 border border-pink-200 rounded-lg p-4">
-            <p class="text-sm text-pink-700 font-semibold">Parité</p>
-            <p class="text-2xl font-bold text-pink-900">${stats.global.globalParityPercent}%</p>
-            <p class="text-xs text-pink-600 mt-1">${stats.global.totalGirls}F / ${stats.global.totalBoys}M</p>
-          </div>
-        </div>
-
-        <!-- ALERTES -->
-        ${stats.alerts.length > 0 ? `
-          <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-            <h4 class="font-semibold text-yellow-900 mb-3">🚨 Alertes Détectées</h4>
-            <div class="space-y-2">
-              ${stats.alerts.map(alert => `
-                <div class="flex items-start gap-2 p-2 bg-white rounded">
-                  <span class="text-lg flex-shrink-0">${alert.icon}</span>
-                  <p class="text-sm text-yellow-900">${alert.message}</p>
-                </div>
-              `).join('')}
-            </div>
-          </div>
-        ` : `
-          <div class="bg-green-50 border border-green-200 rounded-lg p-4">
-            <p class="text-green-900 font-semibold">✅ Tous les indicateurs sont équilibrés!</p>
-          </div>
-        `}
-
-        <!-- TABLEAU DÉTAILLÉ PAR GROUPE -->
-        <div class="overflow-x-auto">
-          <table class="w-full text-sm border-collapse">
-            <thead class="bg-slate-100 border-b-2 border-slate-300">
-              <tr>
-                <th class="px-3 py-2 text-left font-semibold text-slate-900">Groupe</th>
-                <th class="px-3 py-2 text-center font-semibold text-slate-900">Effectif</th>
-                <th class="px-3 py-2 text-center font-semibold text-slate-900">Niveau Moy</th>
-                <th class="px-3 py-2 text-center font-semibold text-slate-900">Écart-type</th>
-                <th class="px-3 py-2 text-center font-semibold text-slate-900">Parité F/M</th>
-                <th class="px-3 py-2 text-center font-semibold text-slate-900">COM</th>
-                <th class="px-3 py-2 text-center font-semibold text-slate-900">TRA</th>
-                <th class="px-3 py-2 text-center font-semibold text-slate-900">PART</th>
-                <th class="px-3 py-2 text-center font-semibold text-slate-900">ABS</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${stats.byGroup.map(g => `
-                <tr class="border-b border-slate-200 hover:bg-slate-50">
-                  <td class="px-3 py-2 font-semibold text-slate-900">${g.name}</td>
-                  <td class="px-3 py-2 text-center text-slate-700">${g.count}</td>
-                  <td class="px-3 py-2 text-center text-slate-700">${g.avgScore}</td>
-                  <td class="px-3 py-2 text-center text-slate-600">±${g.scoreStdDev}</td>
-                  <td class="px-3 py-2 text-center text-slate-700">${g.girls}/${g.boys}</td>
-                  <td class="px-3 py-2 text-center ${g.avgCOM < 2 ? 'text-red-700 font-semibold' : 'text-slate-700'}">${g.avgCOM}</td>
-                  <td class="px-3 py-2 text-center text-slate-700">${g.avgTRA}</td>
-                  <td class="px-3 py-2 text-center text-slate-700">${g.avgPART}</td>
-                  <td class="px-3 py-2 text-center ${g.avgABS > 2 ? 'text-red-700 font-semibold' : 'text-slate-700'}">${g.avgABS}</td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-        </div>
-
-        <!-- BOUTON RÉGÉNÉRER -->
-        <div class="flex gap-3 justify-center">
-          <button
-            type="button"
-            class="px-6 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors"
-            onclick="generateGroups()"
-          >
-            🔄 Régénérer les Groupes
-          </button>
-          <button
-            type="button"
-            class="px-6 py-2 bg-slate-400 text-white font-semibold rounded-lg hover:bg-slate-500 transition-colors"
-            onclick="toggleStatistics()"
-          >
-            ✕ Fermer Stats
-          </button>
-        </div>
-      </div>
-    `;
-  }
-
   function toggleStatistics() {
     state.showStatistics = !state.showStatistics;
     updateUI();
@@ -2539,95 +1939,35 @@
       };
     });
 
-    // Étape 2 : Sélection des classes
+    // Étape 2 : Sélection des classes et regroupements
     qsa('.class-checkbox', state.modal).forEach(checkbox => {
-      checkbox.onchange = handleClassSelection;
+      checkbox.onchange = handlePendingClassSelection;
     });
 
     const selectAllBtn = qs('[data-action="select-all-classes"]', state.modal);
     const deselectAllBtn = qs('[data-action="deselect-all-classes"]', state.modal);
     const retryBtn = qs('[data-action="retry-load"]', state.modal);
-    const passNameInput = qs('[data-input="pass-name"]', state.modal);
-    const createPassBtn = qs('[data-action="create-pass"]', state.modal);
-    const activePassSelect = qs('[data-input="active-pass-select"]', state.modal);
-    const goStep2Btn = qs('[data-action="go-to-step-2"]', state.modal);
+    const createRegBtn = qs('[data-action="create-regroupement"]', state.modal);
+    const incrNewPassBtn = qs('[data-action="increment-new-pass"]', state.modal);
+    const decrNewPassBtn = qs('[data-action="decrement-new-pass"]', state.modal);
+    const newLabelInput = qs('[data-input="new-pass-label"]', state.modal);
 
     if (selectAllBtn) selectAllBtn.onclick = selectAllClasses;
     if (deselectAllBtn) deselectAllBtn.onclick = deselectAllClasses;
     if (retryBtn) retryBtn.onclick = loadAvailableClasses;
-    if (passNameInput) passNameInput.oninput = (e) => { state.newPassLabel = e.target.value; };
-    if (createPassBtn) {
-      createPassBtn.onclick = () => {
-        const pass = createPassFromSelection();
-        if (pass) {
-          showToast(`Regroupement « ${pass.name} » créé`, 'success');
-          updateUI();
-        }
-      };
-    }
-    if (activePassSelect) {
-      activePassSelect.onchange = (e) => {
-        setActivePass(e.target.value);
-        updateUI();
-      };
-    }
-    if (goStep2Btn) {
-      goStep2Btn.onclick = () => {
-        state.currentStep = 2;
-        updateUI();
-      };
-    }
+    if (createRegBtn) createRegBtn.onclick = createRegroupementFromSelection;
+    if (incrNewPassBtn) incrNewPassBtn.onclick = () => updateNewRegroupementCount(1);
+    if (decrNewPassBtn) decrNewPassBtn.onclick = () => updateNewRegroupementCount(-1);
+    if (newLabelInput) newLabelInput.oninput = (e) => {
+      state.newRegroupementLabel = e.target.value;
+    };
 
-    qsa('[data-action="set-active-pass"]', state.modal).forEach(btn => {
-      btn.onclick = () => {
-        const passId = btn.dataset.passId;
-        if (passId) {
-          setActivePass(passId);
-          updateUI();
-        }
-      };
+    qsa('[data-action="delete-regroupement"]', state.modal).forEach(btn => {
+      btn.onclick = () => deleteRegroupement(btn.dataset.regroupementId);
     });
 
-    qsa('[data-action="delete-pass"]', state.modal).forEach(btn => {
-      btn.onclick = () => {
-        const passId = btn.dataset.passId;
-        if (!passId) return;
-        const pass = state.passes.find(p => p.id === passId);
-        const label = pass?.name || 'ce regroupement';
-        if (windowRef.confirm(`Supprimer ${label} ?`)) {
-          removePass(passId);
-          updateUI();
-        }
-      };
-    });
-
-    qsa('[data-persist-mode]', state.modal).forEach(el => {
-      el.onclick = () => {
-        const mode = el.dataset.persistMode;
-        if (!mode) return;
-        state.persistMode = mode;
-        syncActivePassFromState();
-        updateUI();
-      };
-    });
-
-    const offsetInput = qs('[data-input="offset-start"]', state.modal);
-    if (offsetInput) {
-      offsetInput.onchange = (e) => {
-        const value = parseInt(e.target.value, 10);
-        if (Number.isFinite(value) && value > 0) {
-          state.tempOffsetStart = value;
-          state.generatedGroups = applyOffsetToGroups(state.generatedGroups, value);
-          syncActivePassFromState();
-          updateUI();
-        } else {
-          e.target.value = state.tempOffsetStart;
-        }
-      };
-    }
-
-    qsa('[data-action="previous-step"]', state.modal).forEach(btn => {
-      btn.onclick = previousStep;
+    qsa('[data-action="activate-regroupement"]', state.modal).forEach(btn => {
+      btn.onclick = () => activateRegroupement(btn.dataset.regroupementId);
     });
 
     // Étape 3 : Configuration
@@ -2637,7 +1977,7 @@
         state.numGroups = parseInt(e.target.value);
         const display = qs('[data-display="numGroups"]', state.modal);
         if (display) display.textContent = state.numGroups;
-        syncActivePassFromState();
+        updateActiveRegroupementGroupCount(state.numGroups);
       };
     }
 
@@ -2671,50 +2011,28 @@
     // Étape 5 : Actions sur les groupes
     const toggleStatsBtn = qs('[data-action="toggle-statistics"]', state.modal);
     const regenerateBtn = qs('[data-action="regenerate"]', state.modal);
-    const saveModeButtons = qsa('[data-action="set-save-mode"]', state.modal);
     const saveTempBtn = qs('[data-action="save-temp-groups"]', state.modal);
     const loadTempBtn = qs('[data-action="load-temp-groups"]', state.modal);
     const finalizeTempBtn = qs('[data-action="finalize-temp-groups"]', state.modal);
     const exportPdfBtn = qs('[data-action="export-pdf"]', state.modal);
     const exportCsvBtn = qs('[data-action="export-csv"]', state.modal);
-    const snapshotBtn = qs('[data-action="create-snapshot"]', state.modal);
-    const refreshSnapshotsBtn = qs('[data-action="refresh-snapshots"]', state.modal);
-    const restoreSnapshotButtons = qsa('[data-action="restore-snapshot"]', state.modal);
 
     if (toggleStatsBtn) toggleStatsBtn.onclick = toggleStatistics;
     if (regenerateBtn) regenerateBtn.onclick = generateGroups;
-
-    // Handlers pour les boutons de mode (Replace vs Append)
-    saveModeButtons.forEach(btn => {
-      btn.onclick = (e) => {
-        const mode = e.target.closest('button').getAttribute('data-mode');
-
-        // Si persistMode=true (en train de continuer une série), FORCER le mode à 'append'
-        if (state.persistMode && mode === 'replace') {
-          showToast('⚠️ Vous continuez une série! Mode AJOUTER forcé.', 'warning');
-          state.saveMode = 'append';
-        } else {
-          state.saveMode = mode;
-        }
-
-        updateUI();
-        const modeLabel = state.saveMode === 'replace' ? 'Remplacer' : 'Ajouter';
-        const persistLabel = state.persistMode ? ` (continue de ${state.lastTempRange.min}-${state.lastTempRange.max})` : '';
-        showToast(`Mode: ${modeLabel}${persistLabel}`, 'info');
-      };
-    });
-
     if (saveTempBtn) saveTempBtn.onclick = saveTempGroupsUI;
     if (loadTempBtn) loadTempBtn.onclick = loadTempGroupsUI;
     if (finalizeTempBtn) finalizeTempBtn.onclick = finalizeTempGroupsUI;
     if (exportPdfBtn) exportPdfBtn.onclick = exportToPDF;
     if (exportCsvBtn) exportCsvBtn.onclick = exportToCSV;
-    if (snapshotBtn) snapshotBtn.onclick = createSnapshotUI;
-    if (refreshSnapshotsBtn) refreshSnapshotsBtn.onclick = () => fetchSnapshotHistory(true);
-    restoreSnapshotButtons.forEach(btn => {
-      const snapshotId = btn.dataset.snapshotId;
-      btn.onclick = () => restoreSnapshotUI(snapshotId);
+
+    qsa('[data-action="set-persist-mode"]', state.modal).forEach(btn => {
+      btn.onclick = () => setPersistMode(btn.dataset.value);
     });
+
+    const offsetInput = qs('[data-input="offset-start"]', state.modal);
+    if (offsetInput) {
+      offsetInput.oninput = handleOffsetInput;
+    }
 
     // Initialiser Drag & Drop si on est à l'étape 5
     if (state.currentStep === 5 && state.generatedGroups.length > 0) {
@@ -2778,89 +2096,73 @@
     state.currentStep = 1;
     state.groupType = null;
     state.selectedClasses = [];
-    state.generatedGroups = [];
-    state.snapshots = [];
-    state.snapshotLoaded = false;
-    state.snapshotLoading = false;
-    state.snapshotError = null;
-    state.passes = [];
-    state.activePassId = null;
-    state.passSequence = 1;
-    state.persistMode = 'continue';
+    state.availableClasses = [];
+    state.pendingClasses = [];
+    state.regroupements = [];
+    state.activeRegroupementId = null;
+    state.groupsByRegroupement = {};
+    state.persistMode = 'replace';
     state.tempOffsetStart = 1;
-    state.lastTempRange = { start: null, end: null };
-    state.continuationStatus = null;
-    state.continuationStatusError = null;
-    state.isLoadingContinuation = false;
-    state.newPassLabel = '';
+    state.lastTempRange = null;
+    state.lastFinalRange = null;
+    state.generatedGroups = [];
+    state.continuationData = null;
+    state.continuationError = null;
+    state.continuationLoading = false;
     updateUI();
   }
 
   function selectGroupType(type) {
     state.groupType = type;
-    state.snapshots = [];
-    state.snapshotLoaded = false;
-    state.snapshotLoading = false;
-    state.snapshotError = null;
-    state.passes = [];
-    state.activePassId = null;
-    state.passSequence = 1;
-    state.persistMode = 'continue';
+    state.regroupements = [];
+    state.pendingClasses = [];
+    state.groupsByRegroupement = {};
+    state.activeRegroupementId = null;
+    state.selectedClasses = [];
+    state.numGroups = 3;
+    state.persistMode = 'replace';
     state.tempOffsetStart = 1;
-    state.lastTempRange = { start: null, end: null };
-    state.newPassLabel = '';
-    fetchContinuationStatus();
+    state.lastTempRange = null;
+    state.lastFinalRange = null;
+    state.continuationData = null;
+    state.continuationError = null;
+    state.continuationLoading = false;
+    state.newRegroupementLabel = '';
+    state.newRegroupementGroupCount = 3;
     updateUI();
+    fetchContinuationStatus();
     // Auto-avancer après sélection
     setTimeout(() => nextStep(), 300);
   }
 
-  function handleClassSelection(e) {
+  function handlePendingClassSelection(e) {
     const classe = e.target.value;
-    console.log('[DEBUG] Checkbox clicked:');
-    console.log('   value:', classe);
-    console.log('   checked:', e.target.checked);
-    console.log('   Avant:', state.selectedClasses);
+    const checked = e.target.checked;
+    const current = new Set(state.pendingClasses);
 
-    if (e.target.checked) {
-      if (!state.selectedClasses.includes(classe)) {
-        state.selectedClasses.push(classe);
-        console.log('   ✅ Ajoutée');
-      } else {
-        console.log('   ⚠️ Déjà présente');
-      }
+    if (checked) {
+      current.add(classe);
     } else {
-      const before = state.selectedClasses.length;
-      state.selectedClasses = state.selectedClasses.filter(c => c !== classe);
-      const after = state.selectedClasses.length;
-      console.log('   ❌ Retirée (avant:', before, 'après:', after, ')');
+      current.delete(classe);
     }
-    console.log('   Après:', state.selectedClasses);
-    syncActivePassFromState();
+
+    state.pendingClasses = Array.from(current);
     updateUI();
   }
 
   function selectAllClasses() {
-    console.log('[DEBUG] selectAllClasses() appelée');
-    console.log('   availableClasses:', state.availableClasses);
-    state.selectedClasses = [...state.availableClasses];
-    console.log('   selectedClasses après:', state.selectedClasses);
-    syncActivePassFromState();
+    state.pendingClasses = [...state.availableClasses];
     updateUI();
   }
 
   function deselectAllClasses() {
-    console.log('[DEBUG] deselectAllClasses() appelée');
-    console.log('   Avant:', state.selectedClasses);
-    state.selectedClasses = [];
-    console.log('   Après:', state.selectedClasses);
-    syncActivePassFromState();
+    state.pendingClasses = [];
     updateUI();
   }
 
   function changeNumGroups(delta) {
     state.numGroups = Math.max(1, Math.min(10, state.numGroups + delta));
-    syncActivePassFromState();
+    updateActiveRegroupementGroupCount(state.numGroups);
     updateUI();
   }
 
@@ -2901,17 +2203,6 @@
 
     // Re-attach event listeners
     attachEventListeners();
-
-    if (state.currentStep === 5) {
-      if (!state.snapshotLoaded && !state.snapshotLoading && google?.script?.run) {
-        fetchSnapshotHistory();
-      }
-    } else {
-      state.snapshots = [];
-      state.snapshotError = null;
-      state.snapshotLoaded = false;
-      state.snapshotLoading = false;
-    }
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -3037,6 +2328,12 @@
       console.log('   selectedClasses après auto-sélection:', state.selectedClasses);
     }
 
+    if (!Array.isArray(state.pendingClasses) || state.pendingClasses.length === 0) {
+      state.pendingClasses = state.selectedClasses.length
+        ? state.selectedClasses.slice()
+        : state.availableClasses.slice();
+    }
+
     // Compte combien d'élèves on a vraiment
     let totalStudents = 0;
     state.availableClasses.forEach(name => {
@@ -3065,38 +2362,65 @@
   }
 
   function fetchContinuationStatus() {
-    if (!google?.script?.run || !state.groupType) {
-      state.continuationStatus = null;
+    if (!state.groupType) {
+      state.continuationData = null;
+      state.continuationError = null;
+      state.continuationLoading = false;
       return;
     }
 
-    state.isLoadingContinuation = true;
-    state.continuationStatusError = null;
-    updateUI();
+    if (!google?.script?.run) {
+      state.continuationData = null;
+      state.continuationError = null;
+      state.continuationLoading = false;
+      return;
+    }
+
+    state.continuationLoading = true;
+    state.continuationError = null;
 
     google.script.run
       .withSuccessHandler(result => {
-        state.isLoadingContinuation = false;
+        state.continuationLoading = false;
+
         if (result?.success) {
-          state.continuationStatus = result;
-          if (!state.passes.length) {
-            state.tempOffsetStart = result.nextOffset || 1;
-            state.lastTempRange = result.lastTempRange ? { ...result.lastTempRange } : { start: null, end: null };
-            state.lastTempSavedAt = result.lastTempUpdated || null;
-            state.lastFinalRange = result.lastFinalizedRange ? { ...result.lastFinalizedRange } : { start: null, end: null };
-            state.lastFinalizedAt = result.lastFinalizedAt || null;
+          const metadata = result.metadata || {};
+          state.continuationData = { ...state.continuationData, ...metadata };
+
+          if (!state.lastTempRange && metadata.lastTempRange) {
+            state.lastTempRange = metadata.lastTempRange;
+          }
+          if (!state.lastFinalRange && metadata.lastFinalRange) {
+            state.lastFinalRange = metadata.lastFinalRange;
+          }
+
+          const suggestion = Number(metadata.suggestedNextIndex);
+          if (state.persistMode === 'continue' && Number.isFinite(suggestion) && suggestion > 0) {
+            state.tempOffsetStart = suggestion;
+            const regroupement = getActiveRegroupement();
+            if (regroupement) {
+              if (!regroupement.offsetStart || regroupement.persistMode === 'continue') {
+                regroupement.offsetStart = suggestion;
+              }
+            }
+            applyOffsetToGeneratedGroups();
           }
         } else {
-          state.continuationStatusError = result?.error || 'Impossible de lire les métadonnées';
+          state.continuationError = result?.error || 'Statut de continuation indisponible';
         }
-        updateUI();
+
+        if (state.modal) {
+          updateUI();
+        }
       })
       .withFailureHandler(error => {
-        state.isLoadingContinuation = false;
-        state.continuationStatusError = error?.message || String(error);
-        updateUI();
+        state.continuationLoading = false;
+        state.continuationError = error?.message || String(error);
+        if (state.modal) {
+          updateUI();
+        }
       })
-      .getContinuationStatus({ type: state.groupType });
+      .getGroupContinuationStatus(state.groupType);
   }
 
   function loadStudentsFromClasses() {
@@ -3154,10 +2478,9 @@
               sexe:   e.sexe || e.SEXE || e.sex || '',
               classe: displayName,
 
-              // Options et source d'origine
+              // Options
               lv2: e.lv2 || e.LV2 || null,
               opt: e.opt || e.OPT || null,
-              source: e.source || e.SOURCE || null,  // classe d'année précédente
 
               // Scores bruts regroupés
               scores: {
@@ -3185,45 +2508,11 @@
           });
         });
 
-        // CORRECTIF A : Appliquer normalizeScores sur chaque élève
-        // pour garantir que scores.F et scores.M existent quelle que soit la source
-        state.students = students.map(normalizeScores);
-        state.studentsById = new Map(state.students.map(s => [s.id, s]));
+        state.students = students;
+        state.studentsById = new Map(students.map(s => [s.id, s]));
 
-        console.log(`[GroupsModule] 📊 Total d'élèves chargés: ${state.students.length}`);
+        console.log(`[GroupsModule] 📊 Total d'élèves chargés: ${students.length}`);
         console.log('[GroupsModule] 🔍 DEBUG - Premier élève normalisé:', state.students[0]);
-        console.log('[GroupsModule] ✅ Scores normalisés pour tous les élèves');
-
-        // FIX 3 : Filtrer les élèves selon le type de groupe
-        // Langage : filtrer par LV2 sélectionnée
-        if (state.groupType === 'language' && state.selectedLanguage) {
-          const beforeFilter = state.students.length;
-          state.students = state.students.filter(s => {
-            const studentLV2 = (s.lv2 || s.LV2 || '').toString().toUpperCase().trim();
-            const selectedLV2 = state.selectedLanguage.toUpperCase().trim();
-            return studentLV2 === selectedLV2;
-          });
-          const afterFilter = state.students.length;
-          console.log(`[GroupsModule] 🌍 Filtre LV2 appliqué: ${beforeFilter} → ${afterFilter} élèves (LV2="${state.selectedLanguage}")`);
-
-          // Reconstruire la Map avec les élèves filtrés
-          state.studentsById = new Map(state.students.map(s => [s.id, s]));
-        }
-
-        // Options : filtrer par option sélectionnée (futur module)
-        if (state.groupType === 'option' && state.selectedOption) {
-          const beforeFilter = state.students.length;
-          state.students = state.students.filter(s => {
-            const studentOpt = (s.opt || s.OPT || '').toString().toUpperCase().trim();
-            const selectedOpt = state.selectedOption.toUpperCase().trim();
-            return studentOpt === selectedOpt;
-          });
-          const afterFilter = state.students.length;
-          console.log(`[GroupsModule] 🎯 Filtre OPT appliqué: ${beforeFilter} → ${afterFilter} élèves (OPT="${state.selectedOption}")`);
-
-          // Reconstruire la Map avec les élèves filtrés
-          state.studentsById = new Map(state.students.map(s => [s.id, s]));
-        }
 
         resolve(students);
       } catch (error) {
@@ -3269,92 +2558,6 @@
     });
   }
 
-  // ═══════════════════════════════════════════════════════════════
-  //  SPRINT #2 : SCORE COMPOSITE & OPTIMISATION
-  // ═══════════════════════════════════════════════════════════════
-
-  /**
-   * Calcule un score composite pour chaque élève
-   * Pondération : F(0.35) + M(0.35) + COM(0.15) + PART(0.15)
-   */
-  function getCompositeScore(student) {
-    const f = Number(student.scores?.F ?? student.scoreF ?? 0);
-    const m = Number(student.scores?.M ?? student.scoreM ?? 0);
-    const com = Number(student.com ?? 0);
-    const part = Number(student.part ?? 0);
-
-    // Normaliser COM et PART sur 0-20 si nécessaire (souvent 0-5)
-    const comNorm = com <= 5 ? com * 4 : com;  // 5 → 20 pts max
-    const partNorm = part <= 5 ? part * 4 : part;  // 5 → 20 pts max
-
-    // Score composite pondéré
-    return (f * 0.35) + (m * 0.35) + (comNorm * 0.15) + (partNorm * 0.15);
-  }
-
-  /**
-   * Calcule l'écart-type des scores composites par groupe
-   */
-  function calculateGroupScoreStdDev(groups) {
-    const groupAvgs = groups.map(g => {
-      if (g.students.length === 0) return 0;
-      const sum = g.students.reduce((s, stu) => s + getCompositeScore(stu), 0);
-      return sum / g.students.length;
-    });
-    const mean = groupAvgs.reduce((a, b) => a + b, 0) / groupAvgs.length;
-    const variance = groupAvgs.reduce((sum, avg) => sum + Math.pow(avg - mean, 2), 0) / groupAvgs.length;
-    return Math.sqrt(variance);
-  }
-
-  /**
-   * Optimise les groupes via échanges itératifs (local search)
-   * Essaie de minimiser l'écart-type des scores
-   */
-  function optimizeGroupsWithSwaps(groups, maxIterations = 50) {
-    let improved = true;
-    let iteration = 0;
-    let bestStdDev = calculateGroupScoreStdDev(groups);
-
-    console.log(`[GroupsModule] 🔄 Optimisation : écart-type initial = ${bestStdDev.toFixed(3)}`);
-
-    while (improved && iteration < maxIterations) {
-      improved = false;
-      iteration++;
-
-      // Essayer les échanges entre paires de groupes
-      for (let i = 0; i < groups.length && !improved; i++) {
-        for (let j = i + 1; j < groups.length && !improved; j++) {
-          // Essayer d'échanger un élève de groupe i avec un de groupe j
-          for (let ki = 0; ki < groups[i].students.length && !improved; ki++) {
-            for (let kj = 0; kj < groups[j].students.length && !improved; kj++) {
-              // Swap temporaire
-              const tempI = groups[i].students[ki];
-              const tempJ = groups[j].students[kj];
-
-              groups[i].students[ki] = tempJ;
-              groups[j].students[kj] = tempI;
-
-              // Calculer nouvel écart-type
-              const newStdDev = calculateGroupScoreStdDev(groups);
-
-              if (newStdDev < bestStdDev - 0.001) {
-                // Amélioration significative, garder le swap
-                bestStdDev = newStdDev;
-                improved = true;
-                console.log(`   ✅ Itération ${iteration}: swap G${i}-G${j} → σ=${newStdDev.toFixed(3)}`);
-              } else {
-                // Pas d'amélioration, remettre en place
-                groups[i].students[ki] = tempI;
-                groups[j].students[kj] = tempJ;
-              }
-            }
-          }
-        }
-      }
-    }
-
-    console.log(`[GroupsModule] 🎯 Optimisation terminée en ${iteration} itérations. Écart-type final: ${bestStdDev.toFixed(3)}`);
-  }
-
   function generateGroupsLocally() {
     const num = state.numGroups || 3;
     if (!Array.isArray(state.students) || state.students.length === 0) {
@@ -3363,21 +2566,12 @@
       return;
     }
 
-    // 🆕 ÉTAPE 1 : Trier par score composite (au lieu de juste besoin académique)
-    const studentsWithScores = state.students.map(s => ({
-      ...s,
-      compositeScore: getCompositeScore(s)
-    }));
-
-    const sorted = studentsWithScores.sort((a, b) => b.compositeScore - a.compositeScore);
-
+    // 1. On trie par niveau (note haute -> élève "fort")
+    const sorted = sortByNeedScoreDesc(state.students);
     console.log('[GroupsModule] 📊 Distribution par mode:', state.distributionType);
-    console.log('[GroupsModule] 🎓 Score composite (F:0.35, M:0.35, COM:0.15, PART:0.15)');
-    console.log('[GroupsModule] Top 3 élèves:', sorted.slice(0, 3).map(s =>
-      `${s.nom} (composite: ${s.compositeScore.toFixed(1)})`
-    ));
+    console.log('[GroupsModule] Top 3 élèves:', sorted.slice(0, 3).map(s => `${s.nom} (${getNeedScoreForStudent(s).toFixed(1)})`));
 
-    // 🆕 ÉTAPE 2 : Équilibrer parité
+    // 🔴 FIX PARITÉ : Entrelacers filles et garçons pour équilibrer
     const girls = sorted.filter(s => (s.sexe || '').toUpperCase() === 'F');
     const boys = sorted.filter(s => (s.sexe || '').toUpperCase() === 'M');
     const other = sorted.filter(s => {
@@ -3394,32 +2588,35 @@
       if (i < girls.length) balanced.push(girls[i]);
       if (i < boys.length) balanced.push(boys[i]);
     }
+    // Ajouter les autres à la fin
     balanced.push(...other);
 
-    console.log('[GroupsModule] ✅ Liste équilibrée (F/M entrelacées, score composite): ' + balanced.length + ' élèves');
+    console.log('[GroupsModule] ✅ Liste équilibrée (F/M entrelacées): ' + balanced.length + ' élèves');
 
     // 2. On prépare les groupes
-    const baseIndex = state.tempOffsetStart || 1;
     const groups = Array.from({ length: num }, (_, idx) => ({
-      name: `Groupe ${baseIndex + idx}`,
-      index: baseIndex + idx,
+      name: `Groupe ${idx + 1}`,
       students: []
     }));
 
     if (state.distributionType === 'homogeneous') {
-      // Homogène = blocs séquentiels
+      // homogène = on prend le tri équilibré et on découpe en blocs séquentiels
       const chunkSize = Math.ceil(balanced.length / num);
       for (let g = 0; g < num; g++) {
         const slice = balanced.slice(g * chunkSize, (g + 1) * chunkSize);
         groups[g].students.push(...slice);
       }
-      console.log('[GroupsModule] ✅ Distribution homogène (niveaux équilibrés)');
+      console.log('[GroupsModule] ✅ Distribution homogène (groupes de niveau + équilibre F/M)');
     } else {
-      // Hétérogène = snake draft
+      // heterogeneous = on fait un snake draft sur la liste équilibrée :
+      // 1er tour: G1,G2,G3
+      // 2e tour: G3,G2,G1
+      // 3e tour: G1,G2,G3...
       let forward = true;
       let index = 0;
       balanced.forEach(stu => {
         groups[index].students.push(stu);
+
         if (forward) {
           index++;
           if (index >= num) {
@@ -3434,23 +2631,20 @@
           }
         }
       });
-      console.log('[GroupsModule] ✅ Distribution hétérogène (snake draft)');
+      console.log('[GroupsModule] ✅ Distribution hétérogène (équilibrée par niveau + F/M)');
     }
-
-    // 🆕 ÉTAPE 4 : Optimiser avec échanges itératifs
-    optimizeGroupsWithSwaps(groups);
 
     state.generatedGroups = groups;
     state.lastGeneration = new Date();
 
-    // Log de vérification finale
+    applyOffsetToGeneratedGroups();
+
+    // Log de vérification
     groups.forEach((g, idx) => {
       const avgScore = g.students.length > 0
-        ? (g.students.reduce((sum, s) => sum + getCompositeScore(s), 0) / g.students.length).toFixed(2)
+        ? (g.students.reduce((sum, s) => sum + getNeedScoreForStudent(s), 0) / g.students.length).toFixed(1)
         : 0;
-      const girls = g.students.filter(s => (s.sexe || '').toUpperCase() === 'F').length;
-      const boys = g.students.length - girls;
-      console.log(`[GroupsModule] ${g.name}: ${g.students.length} élèves (${girls}F/${boys}M), score moyen: ${avgScore}`);
+      console.log(`[GroupsModule] Groupe ${idx + 1}: ${g.students.length} élèves, niveau moyen: ${avgScore}`);
     });
   }
 
@@ -3468,7 +2662,6 @@
         generateGroupsLocally(); // crée state.generatedGroups
         state.isLoading = false;
         state.currentStep = 5;   // on passe à l'aperçu
-        syncActivePassFromState();
         updateUI();
         showToast(`${state.generatedGroups.length} groupes générés`, 'success');
       })
@@ -3546,7 +2739,8 @@
     updateGroupStats(toGroupIndex);
 
     showToast(`${student.nom} déplacé vers ${state.generatedGroups[toGroupIndex].name}`, 'info', 2000);
-    syncActivePassFromState();
+
+    storeGeneratedGroupsForActiveRegroupement();
   }
 
   function updateGroupStats(groupIndex) {
@@ -3599,336 +2793,95 @@
       return;
     }
 
-    const payload = buildSnapshotPayload();
-    const groupCount = Array.isArray(payload.groups) ? payload.groups.length : 0;
-    payload.timestamp = new Date().toISOString();
+    const regroupement = getActiveRegroupement();
+    const offsetStart = Number(state.tempOffsetStart) || 1;
+    state.tempOffsetStart = offsetStart;
+
+    const normalizedGroups = state.generatedGroups.map(group => ({
+      name: group.name,
+      index: group.index,
+      students: group.students.map(student => ({ ...student }))
+    }));
+
+    const payload = {
+      type: state.groupType,
+      persistMode: state.persistMode,
+      offsetStart,
+      regroupement: regroupement ? {
+        id: regroupement.id,
+        label: regroupement.label,
+        classes: regroupement.classes,
+        groupCount: regroupement.groupCount
+      } : null,
+      config: {
+        selectedClasses: state.selectedClasses,
+        numGroups: state.numGroups,
+        ...(state.groupType === 'needs' && {
+          subject: state.selectedSubject,
+          distributionType: state.distributionType
+        }),
+        ...(state.groupType === 'language' && {
+          language: state.selectedLanguage
+        })
+      },
+      groups: normalizedGroups,
+      timestamp: new Date().toISOString()
+    };
 
     showToast('💾 Sauvegarde temporaire en cours...', 'info');
 
     google.script.run
       .withSuccessHandler((result) => {
         if (result.success) {
-          showToast(`✅ Groupes sauvegardés temporairement (gr${result.typePrefix}1TEMP, etc.)`, 'success');
           console.log('[GroupsModule] Sauvegarde temp réussie:', result);
 
-          if (typeof result.offsetStart === 'number') {
-            state.tempOffsetStart = result.offsetStart;
-          }
-          const range = (result.createdRange && typeof result.createdRange.start === 'number' && typeof result.createdRange.end === 'number')
-            ? { ...result.createdRange }
-            : (groupCount > 0 && typeof result.offsetStart === 'number' && typeof result.offsetEnd === 'number' && result.offsetEnd >= result.offsetStart
-              ? { start: result.offsetStart, end: result.offsetEnd }
-              : null);
-          state.lastTempRange = range || { start: null, end: null };
-          state.lastTempSavedAt = result.timestamp || payload.timestamp;
-          if (result.persistMode) {
-            state.persistMode = result.persistMode;
+          const range = result.createdRange || (result.offsetStart && result.offsetEnd
+            ? { start: result.offsetStart, end: result.offsetEnd }
+            : null);
+
+          state.lastTempRange = range;
+
+          state.continuationData = {
+            ...(state.continuationData || {}),
+            lastTempRange: range || (state.continuationData?.lastTempRange || null),
+            lastTempIndex: result.offsetEnd || state.continuationData?.lastTempIndex || null,
+            lastTempUpdated: result.timestamp || state.continuationData?.lastTempUpdated || null,
+            suggestedNextIndex: result.nextOffset || state.continuationData?.suggestedNextIndex || null,
+            lastFinalRange: state.continuationData?.lastFinalRange || state.lastFinalRange || null
+          };
+
+          if (regroupement) {
+            const startIndex = result.offsetStart || regroupement.offsetStart || state.tempOffsetStart || 1;
+            const endIndex = result.offsetEnd || (startIndex + normalizedGroups.length - 1);
+
+            regroupement.persistMode = state.persistMode;
+            regroupement.offsetStart = startIndex;
+            regroupement.offsetEnd = endIndex;
+            regroupement.lastTempRange = range;
+            regroupement.lastFinalRange = regroupement.lastFinalRange || null;
+            regroupement.groupCount = normalizedGroups.length;
+
+            state.tempOffsetStart = startIndex;
           }
 
-          const activePass = getActivePass();
-          if (activePass) {
-            activePass.lastTempRange = state.lastTempRange ? { ...state.lastTempRange } : { start: null, end: null };
-            activePass.lastSavedAt = state.lastTempSavedAt;
-            activePass.lastCreatedTempSheets = Array.isArray(result.createdSheets) ? result.createdSheets : [];
-            activePass.offsetStart = state.tempOffsetStart;
-            activePass.persistMode = state.persistMode;
-          }
-
-          if (typeof result.nextOffset === 'number') {
-            state.continuationStatus = state.continuationStatus || {};
-            state.continuationStatus.nextOffset = result.nextOffset;
-          }
-
-          syncActivePassFromState();
-          fetchContinuationStatus();
+          applyOffsetToGeneratedGroups();
           updateUI();
+
+          const start = result.offsetStart || regroupement?.offsetStart;
+          const end = result.offsetEnd || regroupement?.offsetEnd;
+          const suffix = start && end ? ` (Groupes ${start} → ${end})` : '';
+          showToast(`✅ Groupes sauvegardés temporairement${suffix}`, 'success');
         } else {
-          // Aucun TEMP existant
-          console.log('Aucun groupe TEMP existant pour ce type');
-        }
-
-        // Procéder à la sauvegarde
-        proceedWithSave();
-      })
-      .withFailureHandler(error => {
-        console.error('Erreur listTempGroups:', error);
-        // En cas d'erreur, continuer quand même
-        showToast('Impossible de vérifier les groupes existants, sauvegarde directe...', 'warning');
-        proceedWithSave();
-      })
-      .listTempGroups(state.groupType);
-
-    function proceedWithSave() {
-      // Si persistMode=true, FORCER saveMode='append' et envoyer l'offsetStart
-      const finalSaveMode = state.persistMode ? 'append' : state.saveMode;
-      const finalOffsetStart = state.persistMode ? state.tempOffsetStart : undefined;
-
-      // 🆕 SPRINT #6: Si activeGroupingId est défini, l'inclure (isolation par passe)
-      const payload = {
-        type: state.groupType,
-        groupingId: state.activeGroupingId || 'default', // 🆕 Isolation par regroupement
-        saveMode: finalSaveMode,        // Force 'append' si persistMode
-        offsetStart: finalOffsetStart,  // Numéro de départ explicite si persistMode
-        persistMode: state.persistMode, // true = continuer la série
-        config: {
-          selectedClasses: state.selectedClasses,
-          numGroups: state.numGroups,
-          ...(state.groupType === 'needs' && {
-            subject: state.selectedSubject,
-            distributionType: state.distributionType
-          }),
-          ...(state.groupType === 'language' && {
-            language: state.selectedLanguage
-          })
-        },
-        groups: state.generatedGroups,
-        timestamp: new Date().toISOString()
-      };
-
-      showToast('💾 Sauvegarde temporaire en cours...', 'info');
-
-      google.script.run
-        .withSuccessHandler((result) => {
-          if (result.success) {
-            const modeLabel = result.saveMode === 'append' ? 'ajoutés' : 'enregistrés';
-            showToast(
-              `✅ Groupes ${modeLabel} de ${result.startNum} à ${result.endNum} ` +
-              `(${result.totalGroups} groupes, ${result.totalEleves} élèves)`,
-              'success'
-            );
-
-            // 🆕 Mémoriser la plage TEMP pour les vagues suivantes
-            state.lastTempRange = {
-              min: result.startNum,
-              max: result.endNum,
-              count: result.totalGroups,
-              typePrefix: result.typePrefix
-            };
-            state.tempOffsetStart = result.endNum + 1; // Prochain offset
-
-            console.log('[GroupsModule] Sauvegarde temp réussie:', result);
-            console.log('[GroupsModule] Mémorisation:', state.lastTempRange);
-
-            // 🆕 SPRINT #1 : Sauvegarder metadata de continuation en PropertiesService
-            // Permet de reprendre après rechargement navigateur
-            google.script.run
-              .withSuccessHandler((resp) => {
-                if (resp.success) {
-                  console.log('[GroupsModule] ✅ Continuation metadata persistée');
-                  showToast('📊 Progression sauvegardée (continuation robuste)', 'info');
-                } else {
-                  console.warn('[GroupsModule] ⚠️ Persistence metadata échouée:', resp.error);
-                }
-              })
-              .withFailureHandler((err) => {
-                console.error('[GroupsModule] ❌ Erreur persistance:', err);
-              })
-              .saveContinuationMetadata(state.groupType, {
-                lastTempRange: state.lastTempRange,
-                tempOffsetStart: state.tempOffsetStart,
-                persistMode: state.persistMode
-              });
-          } else {
-            showToast(`Erreur: ${result.error}`, 'error');
-          }
-        })
-        .withFailureHandler(error => {
-          showToast(`Erreur de sauvegarde : ${error?.message || error}`, 'error');
-        })
-        .saveTempGroups(payload);
-    }
-  }
-
-  function buildSnapshotPayload() {
-    const baseConfig = {
-      selectedClasses: state.selectedClasses,
-      numGroups: state.numGroups,
-      groupTypeLabel: GROUP_TYPES[state.groupType]?.title || state.groupType
-    };
-
-    if (state.groupType === 'needs') {
-      baseConfig.subject = state.selectedSubject;
-      baseConfig.subjectLabel = SUBJECTS[state.selectedSubject]?.label || state.selectedSubject;
-      baseConfig.distributionType = state.distributionType;
-      baseConfig.distributionLabel = DISTRIBUTION_TYPES[state.distributionType]?.label || state.distributionType;
-    }
-
-    if (state.groupType === 'language') {
-      baseConfig.language = state.selectedLanguage;
-      baseConfig.languageLabel = state.selectedLanguage;
-    }
-
-    const activePass = getActivePass();
-    const baseIndex = state.tempOffsetStart || 1;
-
-    return {
-      type: state.groupType,
-      persistMode: state.persistMode,
-      offsetStart: baseIndex,
-      passId: activePass?.id || null,
-      passName: activePass?.name || null,
-      config: {
-        ...baseConfig,
-        offsetStart: baseIndex,
-        persistMode: state.persistMode,
-        passId: activePass?.id || null,
-        passName: activePass?.name || null
-      },
-      groups: (state.generatedGroups || []).map((group, index) => ({
-        name: group.name || `Groupe ${baseIndex + index}`,
-        index: typeof group.index === 'number' ? group.index : baseIndex + index,
-        students: (group.students || []).map(sanitizeStudentForTransfer)
-      }))
-    };
-  }
-
-  function fetchSnapshotHistory(force = false) {
-    if (!google?.script?.run) return;
-    if (!state.groupType) return;
-    if (state.snapshotLoading) return;
-    if (!force && state.snapshotLoaded) return;
-
-    if (force) {
-      state.snapshotLoaded = false;
-    }
-
-    state.snapshotLoading = true;
-    updateUI();
-
-    google.script.run
-      .withSuccessHandler(result => {
-        state.snapshotLoading = false;
-        state.snapshotLoaded = true;
-        state.snapshotError = null;
-        state.snapshots = Array.isArray(result?.snapshots) ? result.snapshots : [];
-        updateUI();
-      })
-      .withFailureHandler(error => {
-        state.snapshotLoading = false;
-        state.snapshotLoaded = true;
-        state.snapshotError = error?.message || String(error);
-        updateUI();
-        showToast(`Erreur historique : ${state.snapshotError}`, 'error');
-      })
-      .listGroupSnapshots({ type: state.groupType });
-  }
-
-  function createSnapshotUI() {
-    if (!google?.script?.run) {
-      showToast('Google Apps Script non disponible', 'error');
-      return;
-    }
-
-    if (!state.generatedGroups || state.generatedGroups.length === 0) {
-      showToast('Aucun groupe à capturer', 'warning');
-      return;
-    }
-
-    const payload = buildSnapshotPayload();
-
-    showToast('📸 Création d\'un snapshot...', 'info');
-
-    google.script.run
-      .withSuccessHandler(result => {
-        if (result?.success) {
-          showToast('✅ Snapshot enregistré', 'success');
-          state.snapshotLoaded = false;
-          fetchSnapshotHistory(true);
-        } else {
-          showToast(`Erreur snapshot: ${result?.error || 'Résultat invalide'}`, 'error');
+          showToast(`Erreur: ${result.error}`, 'error');
         }
       })
       .withFailureHandler(error => {
-        showToast(`Erreur snapshot : ${error?.message || error}`, 'error');
+        showToast(`Erreur de sauvegarde : ${error?.message || error}`, 'error');
       })
-      .createGroupSnapshot(payload);
+      .saveTempGroups(payload);
   }
 
-  function restoreSnapshotUI(snapshotId) {
-    if (!snapshotId) return;
-
-    if (!google?.script?.run) {
-      showToast('Google Apps Script non disponible', 'error');
-      return;
-    }
-
-    showToast('♻️ Restauration du snapshot...', 'info');
-
-    google.script.run
-      .withSuccessHandler(result => {
-        if (!result || !result.success) {
-          showToast(`Erreur restauration: ${result?.error || 'Résultat invalide'}`, 'error');
-          return;
-        }
-
-        if (result.type && state.groupType && state.groupType !== result.type) {
-          showToast('⚠️ Snapshot d\'un autre type de groupe', 'warning');
-        }
-
-        if (result.type) {
-          state.groupType = result.type;
-        }
-
-        const baseIndex = typeof result.offsetStart === 'number'
-          ? result.offsetStart
-          : typeof result.config?.offsetStart === 'number'
-            ? result.config.offsetStart
-            : (state.tempOffsetStart || 1);
-
-        const restoredGroups = (result.groups || []).map((group, index) => ({
-          name: group.name || `Groupe ${baseIndex + index}`,
-          index: typeof group.index === 'number' ? group.index : baseIndex + index,
-          students: (group.students || []).map(normalizeStudentStructure)
-        }));
-
-        state.generatedGroups = restoredGroups;
-        state.numGroups = restoredGroups.length || state.numGroups;
-        state.tempOffsetStart = baseIndex;
-        state.persistMode = result.persistMode || result.config?.persistMode || state.persistMode;
-        if (result.lastTempRange) {
-          state.lastTempRange = { ...result.lastTempRange };
-        }
-        if (result.lastFinalRange) {
-          state.lastFinalRange = { ...result.lastFinalRange };
-        }
-        if (result.lastFinalizedAt) {
-          state.lastFinalizedAt = result.lastFinalizedAt;
-        }
-        state.lastTempSavedAt = result.lastTempUpdated || result.timestamp || state.lastTempSavedAt;
-
-        const restoredClasses = result.metadata?.selectedClasses;
-        if (Array.isArray(restoredClasses)) {
-          state.selectedClasses = restoredClasses;
-        } else if (typeof restoredClasses === 'string') {
-          state.selectedClasses = restoredClasses.split(',').map(c => c.trim()).filter(Boolean);
-        }
-
-        if (result.metadata?.distributionType) {
-          state.distributionType = result.metadata.distributionType;
-        }
-        if (result.metadata?.language) {
-          state.selectedLanguage = result.metadata.language;
-        }
-        if (result.metadata?.subject) {
-          state.selectedSubject = result.metadata.subject;
-        }
-
-        state.lastGeneration = result.timestamp || new Date().toISOString();
-        state.snapshotError = null;
-        state.snapshotLoaded = true;
-        state.snapshotLoading = false;
-
-        syncActivePassFromState();
-
-        updateUI();
-        showToast('✅ Snapshot restauré', 'success');
-      })
-      .withFailureHandler(error => {
-        showToast(`Erreur restauration : ${error?.message || error}`, 'error');
-      })
-      .restoreFromSnapshot({ snapshotId });
-  }
-
+  // ✅ BLOCKER #3 FIX: Utiliser les helpers et meilleur contexte
   function finalizeTempGroupsUI() {
     if (!google?.script?.run) {
       showToast('Google Apps Script non disponible', 'error');
@@ -3942,48 +2895,70 @@
     };
 
     const typeName = typeMap[state.groupType] || state.groupType;
+    const regroupement = getActiveRegroupement();
+    const persistMode = getEffectivePersistMode();
+    const lastTemp = getEffectiveLastTempRange();
+    const lastFinal = getEffectiveLastFinalRange();
 
-    // Déterminer le finalizeMode basé sur persistMode ET saveMode
-    // Si persistMode=true → finalize='merge' (cumule avec existants, ne supprime pas)
-    // Si persistMode=false ET saveMode='append' → finalize='merge'
-    // Si persistMode=false ET saveMode='replace' → finalize='replace'
-    const finalizeMode = (state.persistMode || state.saveMode === 'append') ? 'merge' : 'replace';
-
-    const modeLabel = finalizeMode === 'merge' ? 'en fusionnant' : 'en remplaçant les anciens';
-    showToast(`🎯 Finalisation de ${typeName} ${modeLabel}...`, 'info');
-
-    const finalizePayload = {
-      type: state.groupType,
-      persistMode: state.persistMode,
-      offsetStart: state.tempOffsetStart,
-      tempRange: state.lastTempRange,
-      passId: getActivePass()?.id || null,
-      passName: getActivePass()?.name || null,
-      config: buildSnapshotPayload().config
+    const metadata = {
+      offsetStart: regroupement?.offsetStart || getEffectiveOffsetStart() || 1,
+      offsetEnd: regroupement?.offsetEnd || (regroupement?.offsetStart
+        ? regroupement.offsetStart + (state.generatedGroups?.length || 0) - 1
+        : null),
+      lastTempRange: lastTemp,
+      lastFinalRange: lastFinal
     };
+
+    const request = {
+      type: state.groupType,
+      persistMode: persistMode,
+      metadata,
+      regroupement: regroupement ? {
+        id: regroupement.id,
+        label: regroupement.label,
+        classes: regroupement.classes,
+        groupCount: regroupement.groupCount
+      } : null
+    };
+
+    showToast(`🎯 Finalisation de ${typeName}...`, 'info');
 
     google.script.run
       .withSuccessHandler((result) => {
         if (result.success) {
-          const groupingLabel = state.activeGroupingId || 'tous';
-          showToast(`✅ ${typeName} finalisés pour ${groupingLabel} !`, 'success');
+          console.log('[GroupsModule] Finalisation réussie:', result);
 
-          // Si persistMode était actif, le réinitialiser après finalisation réussie
-          if (state.persistMode) {
-            state.persistMode = false;
-            state.lastTempRange = null;
-            state.tempOffsetStart = 1;
-            console.log('[GroupsModule] persistMode réinitialisé après finalisation');
+          const range = result.lastFinalRange;
+
+          // ✅ BLOCKER #3 FIX: Mettre à jour per-regroupement ET global
+          state.lastFinalRange = range || state.lastFinalRange || null;
+          state.continuationData = {
+            ...(state.continuationData || {}),
+            lastFinalRange: state.lastFinalRange,
+            lastUpdated: result.finalizedAt || state.continuationData?.lastUpdated || null,
+            suggestedNextIndex: range ? (range.end + 1) : state.continuationData?.suggestedNextIndex || null,
+            lastTempRange: null // Clear TEMP après finalization
+          };
+
+          if (regroupement) {
+            regroupement.lastFinalRange = range || regroupement.lastFinalRange || null;
+            // Pour le prochain regroupement, suggérer le numéro suivant
+            if (range && persistMode === 'continue') {
+              regroupement.suggestedNextOffset = range.end + 1;
+            }
           }
 
-          console.log('[GroupsModule] Finalisation réussie:', result);
-          state.lastFinalRange = result.lastFinalRange ? { ...result.lastFinalRange } : { start: null, end: null };
-          state.lastFinalizedAt = result.finalizedAt || new Date().toISOString();
-          state.lastTempRange = { start: null, end: null };
-          state.lastTempSavedAt = null;
-          syncActivePassFromState();
-          fetchContinuationStatus();
+          // En mode replace, réinitialiser l'offset pour la prochaine passe
+          if (persistMode === 'replace' && regroupement) {
+            regroupement.offsetStart = 1;
+            state.tempOffsetStart = 1;
+          }
+
           updateUI();
+          fetchContinuationStatus();
+
+          const suffix = range ? ` (Groupes ${range.start} → ${range.end})` : '';
+          showToast(`✅ ${typeName} finalisés et visibles${suffix}`, 'success');
         } else {
           showToast(`Erreur: ${result.error}`, 'error');
         }
@@ -3991,7 +2966,7 @@
       .withFailureHandler(error => {
         showToast(`Erreur de finalisation : ${error?.message || error}`, 'error');
       })
-      .finalizeTempGroups(finalizePayload);
+      .finalizeTempGroups(request);
   }
 
   function loadTempGroupsUI() {
@@ -4000,54 +2975,75 @@
       return;
     }
 
-    // D'abord, vérifier quels TEMP existent
-    showToast('Vérification des groupes temporaires...', 'info');
+    showToast('📥 Chargement des groupes temporaires...', 'info');
 
     google.script.run
       .withSuccessHandler((result) => {
-          if (result.success && result.groups && result.groups.length > 0) {
-            // Charger les groupes depuis Google Sheets
-            state.generatedGroups = result.groups.map((group, index) => ({
-              name: group.name || `Groupe ${(result.offsetStart || 1) + index}`,
-              index: typeof group.index === 'number' ? group.index : (result.offsetStart || 1) + index,
-              students: (group.students || []).map(normalizeStudentStructure)
-            }));
-            state.numGroups = state.generatedGroups.length;
-            if (typeof result.offsetStart === 'number') {
-              state.tempOffsetStart = result.offsetStart;
+        if (result.success && Array.isArray(result.groups) && result.groups.length > 0) {
+          const offsetStart = Number(result.offsetStart) || Number(result.range?.start) || state.tempOffsetStart || 1;
+          const normalizedGroups = result.groups.map((group, index) => {
+            const groupIndex = Number(group.index);
+            const resolvedIndex = Number.isFinite(groupIndex) ? groupIndex : (offsetStart + index);
+            const students = Array.isArray(group.students)
+              ? group.students.map((student, sIndex) => {
+                  const normalized = normalizeStudentFromSheet(student, `grp${resolvedIndex}`, sIndex);
+                  return normalized || student;
+                })
+              : [];
+
+            return {
+              name: group.name || `Groupe ${resolvedIndex}`,
+              index: resolvedIndex,
+              students
+            };
+          });
+
+          const regroupement = getActiveRegroupement();
+          const derivedRange = result.range || (result.offsetStart && result.offsetEnd
+            ? { start: result.offsetStart, end: result.offsetEnd }
+            : null);
+
+          state.generatedGroups = normalizedGroups;
+          state.currentStep = 5;
+          state.tempOffsetStart = offsetStart;
+          state.lastTempRange = derivedRange;
+
+          state.continuationData = {
+            ...(state.continuationData || {}),
+            lastTempRange: derivedRange || state.continuationData?.lastTempRange || null,
+            lastTempIndex: derivedRange?.end || state.continuationData?.lastTempIndex || null,
+            suggestedNextIndex: derivedRange?.end ? derivedRange.end + 1 : (state.continuationData?.suggestedNextIndex || null)
+          };
+
+          if (regroupement) {
+            const indexes = normalizedGroups
+              .map(g => Number(g.index))
+              .filter(idx => Number.isFinite(idx));
+            if (indexes.length > 0) {
+              regroupement.offsetStart = Math.min(...indexes);
+              regroupement.offsetEnd = Math.max(...indexes);
+            } else {
+              regroupement.offsetStart = offsetStart;
+              regroupement.offsetEnd = offsetStart + normalizedGroups.length - 1;
             }
-          if (result.persistMode) {
-            state.persistMode = result.persistMode;
+            regroupement.groupCount = normalizedGroups.length;
+            regroupement.lastTempRange = derivedRange;
           }
-          if (result.createdRange) {
-            state.lastTempRange = { ...result.createdRange };
-          } else if (typeof result.offsetStart === 'number' && typeof result.offsetEnd === 'number' && result.totalGroups > 0) {
-            state.lastTempRange = { start: result.offsetStart, end: result.offsetEnd };
-          } else {
-            state.lastTempRange = { start: null, end: null };
-          }
-          if (result.lastFinalRange) {
-            state.lastFinalRange = { ...result.lastFinalRange };
-          }
-          if (result.lastFinalizedAt) {
-            state.lastFinalizedAt = result.lastFinalizedAt;
-          }
-          state.lastTempSavedAt = result.lastTempUpdated || new Date().toISOString();
-          state.currentStep = 5; // Aller à l'aperçu
-          syncActivePassFromState();
-          fetchContinuationStatus();
+
+          applyOffsetToGeneratedGroups();
           updateUI();
-          showToast(`✅ ${result.totalGroups} groupes chargés (${result.groups.reduce((sum, g) => sum + g.count, 0)} élèves)`, 'success');
-          console.log('[GroupsModule] Groupes chargés:', state.generatedGroups);
+
+          const totalStudents = normalizedGroups.reduce((sum, g) => sum + g.students.length, 0);
+          showToast(`✅ ${result.totalGroups} groupes chargés (${totalStudents} élèves)`, 'success');
+          console.log('[GroupsModule] Groupes chargés:', normalizedGroups);
         } else {
-          showToast('Aucun groupe temporaire trouvé pour le type: ' + state.groupType, 'warning');
+          showToast('Aucun groupe temporaire trouvé', 'warning');
         }
       })
       .withFailureHandler(error => {
-        console.error('Erreur listTempGroups:', error);
-        showToast('Impossible de lister les groupes: ' + (error?.message || error), 'error');
+        showToast(`Erreur de chargement : ${error?.message || error}`, 'error');
       })
-      .listTempGroups(state.groupType);
+      .loadTempGroups(state.groupType);
   }
 
   // Alias pour compatibilité avec anciens appels
@@ -4055,347 +3051,9 @@
     saveTempGroupsUI();
   }
 
-  // ═══════════════════════════════════════════════════════════════
-  //  🆕 SPRINT #4 : SNAPSHOT MANAGEMENT (Versioning)
-  // ═══════════════════════════════════════════════════════════════
-
-  function showSnapshotBrowser(groupName) {
-    if (!google?.script?.run) {
-      showToast('Google Apps Script non disponible', 'error');
-      return;
-    }
-
-    showToast(`📸 Chargement des versions de ${groupName}...`, 'info');
-
-    google.script.run
-      .withSuccessHandler((result) => {
-        if (result.success && result.snapshots && result.snapshots.length > 0) {
-          renderSnapshotDialog(groupName, result.snapshots);
-        } else {
-          showToast(`Aucune version pour ${groupName}`, 'info');
-        }
-      })
-      .withFailureHandler(error => {
-        showToast(`Erreur: ${error?.message || error}`, 'error');
-      })
-      .listGroupSnapshots(groupName);
-  }
-
-  function renderSnapshotDialog(groupName, snapshots) {
-    // Créer la modale des snapshots
-    const modal = documentRef.createElement('div');
-    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-[10000]';
-    modal.innerHTML = `
-      <div class="bg-white rounded-2xl shadow-2xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col">
-        <!-- En-tête -->
-        <div class="bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-8 py-6 rounded-t-2xl flex items-center justify-between">
-          <div class="flex items-center gap-3">
-            <i class="fas fa-history text-2xl"></i>
-            <div>
-              <h2 class="text-2xl font-bold">Historique des Versions</h2>
-              <p class="text-blue-100 text-sm">${groupName}</p>
-            </div>
-          </div>
-          <button class="text-white hover:bg-white/20 rounded-lg p-2 transition" onclick="this.closest('[data-modal]').remove()">
-            <i class="fas fa-times text-xl"></i>
-          </button>
-        </div>
-
-        <!-- Contenu -->
-        <div class="overflow-y-auto flex-1 px-8 py-6">
-          ${snapshots.length === 0 ? `
-            <div class="text-center py-8 text-gray-400">
-              <i class="fas fa-inbox text-4xl mb-3 block"></i>
-              <p>Aucune version disponible</p>
-            </div>
-          ` : `
-            <div class="space-y-3">
-              ${snapshots.map((snap, idx) => `
-                <div class="bg-gray-50 rounded-xl p-4 border border-gray-200 hover:border-blue-300 hover:shadow-md transition flex items-center justify-between">
-                  <div class="flex-1">
-                    <div class="font-semibold text-gray-800">${snap.name}</div>
-                    <div class="text-sm text-gray-500 flex items-center gap-4 mt-1">
-                      <span><i class="fas fa-calendar"></i> ${formatDate(snap.timestamp)}</span>
-                      <span><i class="fas fa-users"></i> ${snap.studentCount || 0} élèves</span>
-                    </div>
-                  </div>
-                  <div class="flex gap-2">
-                    <button
-                      class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition font-semibold text-sm"
-                      onclick="restoreSnapshotUI('${groupName}', '${snap.name}')"
-                    >
-                      <i class="fas fa-undo"></i> Restaurer
-                    </button>
-                    <button
-                      class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition font-semibold text-sm"
-                      onclick="deleteSnapshotUI('${snap.name}')"
-                    >
-                      <i class="fas fa-trash"></i> Supprimer
-                    </button>
-                  </div>
-                </div>
-              `).join('')}
-            </div>
-          `}
-        </div>
-
-        <!-- Pied de page -->
-        <div class="bg-gray-50 border-t px-8 py-4 rounded-b-2xl flex justify-end gap-3">
-          <button
-            class="px-6 py-2 border border-gray-300 rounded-lg hover:bg-gray-100 transition font-semibold"
-            onclick="this.closest('[data-modal]').remove()"
-          >
-            Fermer
-          </button>
-        </div>
-      </div>
-    `;
-    modal.setAttribute('data-modal', 'snapshots');
-    modal.onclick = (e) => {
-      if (e.target === modal) modal.remove();
-    };
-    documentRef.body.appendChild(modal);
-  }
-
-  function restoreSnapshotUI(groupName, snapshotName) {
-    if (!confirm(`Êtes-vous sûr de vouloir restaurer ${snapshotName} ?\nCela remplacera le groupe "${groupName}" par cette version.`)) {
-      return;
-    }
-
-    showToast(`🔄 Restauration de ${snapshotName}...`, 'info');
-
-    google.script.run
-      .withSuccessHandler((result) => {
-        if (result.success) {
-          showToast(`✅ ${groupName} restauré depuis ${snapshotName}`, 'success');
-          // Fermer la modale
-          const modal = documentRef.querySelector('[data-modal="snapshots"]');
-          if (modal) modal.remove();
-          // Recharger les groupes
-          loadTempGroupsUI();
-        } else {
-          showToast(`Erreur: ${result.error}`, 'error');
-        }
-      })
-      .withFailureHandler(error => {
-        showToast(`Erreur de restauration: ${error?.message || error}`, 'error');
-      })
-      .restoreFromSnapshot(snapshotName);
-  }
-
-  function deleteSnapshotUI(snapshotName) {
-    if (!confirm(`Êtes-vous sûr de vouloir supprimer ${snapshotName} ?`)) {
-      return;
-    }
-
-    showToast(`🗑️ Suppression de ${snapshotName}...`, 'info');
-
-    google.script.run
-      .withSuccessHandler((result) => {
-        if (result.success) {
-          showToast(`✅ ${snapshotName} supprimé`, 'success');
-          // Rafraîchir la liste (en relançant le chargement)
-          const groupName = snapshotName.split('_snapshot_')[0];
-          showSnapshotBrowser(groupName);
-        } else {
-          showToast(`Erreur: ${result.error}`, 'error');
-        }
-      })
-      .withFailureHandler(error => {
-        showToast(`Erreur de suppression: ${error?.message || error}`, 'error');
-      })
-      .deleteSnapshot(snapshotName);
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  //  🆕 SPRINT #5 : AUDIT LOGGING & HISTORIQUE
-  // ═══════════════════════════════════════════════════════════════
-
-  function showAuditHistory(groupName) {
-    if (!google?.script?.run) {
-      showToast('Google Apps Script non disponible', 'error');
-      return;
-    }
-
-    showToast(`📋 Chargement de l'historique pour ${groupName}...`, 'info');
-
-    google.script.run
-      .withSuccessHandler((result) => {
-        if (result.success && result.logs && result.logs.length > 0) {
-          renderAuditDialog(groupName, result.logs);
-        } else {
-          showToast(`Aucun historique pour ${groupName}`, 'info');
-        }
-      })
-      .withFailureHandler(error => {
-        showToast(`Erreur: ${error?.message || error}`, 'error');
-      })
-      .getAuditLog(groupName, 50);
-  }
-
-  function renderAuditDialog(groupName, logs) {
-    const modal = documentRef.createElement('div');
-    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-[10000]';
-    modal.innerHTML = `
-      <div class="bg-white rounded-2xl shadow-2xl max-w-4xl w-full mx-4 max-h-[80vh] flex flex-col">
-        <!-- En-tête -->
-        <div class="bg-gradient-to-r from-green-600 to-emerald-600 text-white px-8 py-6 rounded-t-2xl flex items-center justify-between">
-          <div class="flex items-center gap-3">
-            <i class="fas fa-history text-2xl"></i>
-            <div>
-              <h2 class="text-2xl font-bold">Historique d'Audit</h2>
-              <p class="text-green-100 text-sm">${groupName}</p>
-            </div>
-          </div>
-          <button class="text-white hover:bg-white/20 rounded-lg p-2 transition" onclick="this.closest('[data-modal]').remove()">
-            <i class="fas fa-times text-xl"></i>
-          </button>
-        </div>
-
-        <!-- Contenu -->
-        <div class="overflow-y-auto flex-1 px-8 py-6">
-          ${logs.length === 0 ? `
-            <div class="text-center py-8 text-gray-400">
-              <i class="fas fa-inbox text-4xl mb-3 block"></i>
-              <p>Aucun historique d'audit</p>
-            </div>
-          ` : `
-            <div class="space-y-2">
-              <table class="w-full border-collapse text-sm">
-                <thead>
-                  <tr class="bg-gray-100 border-b-2 border-gray-300">
-                    <th class="px-3 py-2 text-left font-semibold">#</th>
-                    <th class="px-3 py-2 text-left font-semibold">Date/Heure</th>
-                    <th class="px-3 py-2 text-left font-semibold">Opération</th>
-                    <th class="px-3 py-2 text-left font-semibold">Type</th>
-                    <th class="px-3 py-2 text-left font-semibold">Utilisateur</th>
-                    <th class="px-3 py-2 text-left font-semibold">Statut</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${logs.map((log, idx) => `
-                    <tr class="border-b border-gray-200 hover:bg-gray-50">
-                      <td class="px-3 py-2 text-gray-600">${log.index}</td>
-                      <td class="px-3 py-2 text-gray-700 text-xs">${formatDate(log.timestamp)}</td>
-                      <td class="px-3 py-2">
-                        <span class="px-2 py-1 rounded text-xs font-semibold ${getOperationBadgeClass(log.operation)}">
-                          ${log.operation}
-                        </span>
-                      </td>
-                      <td class="px-3 py-2 text-gray-700 text-xs">${log.groupType}</td>
-                      <td class="px-3 py-2 text-gray-700 text-xs">${log.user}</td>
-                      <td class="px-3 py-2">
-                        <span class="px-2 py-1 rounded text-xs font-semibold ${log.status === 'SUCCESS' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">
-                          ${log.status}
-                        </span>
-                      </td>
-                    </tr>
-                  `).join('')}
-                </tbody>
-              </table>
-            </div>
-          `}
-        </div>
-
-        <!-- Pied de page -->
-        <div class="bg-gray-50 border-t px-8 py-4 rounded-b-2xl flex justify-between gap-3">
-          <button
-            class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition font-semibold text-sm"
-            onclick="exportAuditReportUI('${groupName}')"
-          >
-            <i class="fas fa-download"></i> Exporter JSON
-          </button>
-          <button
-            class="px-6 py-2 border border-gray-300 rounded-lg hover:bg-gray-100 transition font-semibold"
-            onclick="this.closest('[data-modal]').remove()"
-          >
-            Fermer
-          </button>
-        </div>
-      </div>
-    `;
-    modal.setAttribute('data-modal', 'audit');
-    modal.onclick = (e) => {
-      if (e.target === modal) modal.remove();
-    };
-    documentRef.body.appendChild(modal);
-  }
-
-  function getOperationBadgeClass(operation) {
-    const classes = {
-      'SAVE': 'bg-blue-100 text-blue-700',
-      'FINALIZE': 'bg-green-100 text-green-700',
-      'RESTORE': 'bg-orange-100 text-orange-700',
-      'CREATE_SNAPSHOT': 'bg-purple-100 text-purple-700',
-      'DELETE': 'bg-red-100 text-red-700'
-    };
-    return classes[operation] || 'bg-gray-100 text-gray-700';
-  }
-
-  function exportAuditReportUI(groupName) {
-    showToast(`📥 Génération du rapport d'audit pour ${groupName}...`, 'info');
-
-    google.script.run
-      .withSuccessHandler((result) => {
-        if (result.success && result.json) {
-          // Télécharger comme fichier JSON
-          const blob = new Blob([result.json], { type: 'application/json;charset=utf-8;' });
-          const url = URL.createObjectURL(blob);
-          const link = documentRef.createElement('a');
-          link.href = url;
-          link.download = `audit_${groupName}_${new Date().toISOString().split('T')[0]}.json`;
-          documentRef.body.appendChild(link);
-          link.click();
-          documentRef.body.removeChild(link);
-          URL.revokeObjectURL(url);
-
-          showToast(`✅ Rapport d'audit exporté: ${link.download}`, 'success');
-        } else {
-          showToast(`Erreur: ${result.error}`, 'error');
-        }
-      })
-      .withFailureHandler(error => {
-        showToast(`Erreur d'export: ${error?.message || error}`, 'error');
-      })
-      .exportAuditReport(groupName);
-  }
-
   function exportToPDF() {
-    if (!state.generatedGroups || state.generatedGroups.length === 0) {
-      showToast('Aucun groupe à exporter', 'warning');
-      return;
-    }
-
-    if (!google?.script?.run) {
-      showToast('Google Apps Script non disponible', 'error');
-      return;
-    }
-
-    const payload = buildSnapshotPayload();
-    payload.config = {
-      ...payload.config,
-      groupTypeLabel: GROUP_TYPES[state.groupType]?.title || state.groupType
-    };
-
-    showToast('📄 Génération du PDF...', 'info');
-
-    google.script.run
-      .withSuccessHandler((result) => {
-        if (result && result.success && result.data) {
-          const downloaded = downloadBase64File(result.data, result.fileName || 'groupes.pdf', result.mimeType || 'application/pdf');
-          if (downloaded) {
-            showToast('✅ PDF généré et téléchargé', 'success');
-          } else {
-            showToast('Erreur lors du téléchargement du PDF', 'error');
-          }
-        } else {
-          showToast(`Erreur export PDF: ${result?.error || 'Résultat invalide'}`, 'error');
-        }
-      })
-      .withFailureHandler(error => {
-        showToast(`Erreur export PDF : ${error?.message || error}`, 'error');
-      })
-      .exportGroupsToPDF(payload);
+    showToast('Export PDF en développement', 'info');
+    // TODO: Implémenter export PDF
   }
 
   function exportToCSV() {
@@ -4447,14 +3105,8 @@
         to { transform: translateX(0); opacity: 1; }
       }
 
-      @keyframes spin-fast {
-        from { transform: rotate(0deg); }
-        to { transform: rotate(360deg); }
-      }
-
       .animate-fade-in { animation: fade-in 0.2s ease; }
       .animate-slide-in { animation: slide-in 0.3s ease; }
-      .animate-spin { animation: spin-fast 0.8s linear infinite; }
 
       /* STEPPER */
       .stepper-step {
@@ -4737,6 +3389,16 @@
         background: white;
       }
 
+      .statistics-panel {
+        width: 100%;
+      }
+
+      @media (min-width: 1024px) {
+        .statistics-panel {
+          max-width: 360px;
+        }
+      }
+
       .summary-icon {
         width: 3.5rem;
         height: 3.5rem;
@@ -4770,10 +3432,6 @@
         background: white;
         overflow: hidden;
         transition: all 0.2s ease;
-        display: flex;
-        flex-direction: column;
-        height: 100%;
-        min-height: 150px; /* hauteur min réduite pour maximiser l'espace de liste */
       }
 
       .group-card:hover {
@@ -4787,7 +3445,6 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
-        flex-shrink: 0;
       }
 
       .group-title {
@@ -4807,7 +3464,6 @@
         display: flex;
         gap: 1rem;
         flex-wrap: wrap;
-        flex-shrink: 0;
       }
 
       .stat-item {
@@ -4821,45 +3477,23 @@
 
       .group-students {
         padding: 1rem;
+        min-height: 8rem;
+        max-height: 24rem;
         overflow-y: auto;
-        flex: 1; /* Prend tout l'espace disponible */
-        min-height: 0; /* Important pour flexbox : permet au scroll de marcher */
-        scrollbar-width: thin;
-        scrollbar-color: #cbd5e1 #f1f5f9;
-      }
-
-      /* Scrollbar personnalisée (Webkit) */
-      .group-students::-webkit-scrollbar {
-        width: 6px;
-      }
-
-      .group-students::-webkit-scrollbar-track {
-        background: #f1f5f9;
-        border-radius: 3px;
-      }
-
-      .group-students::-webkit-scrollbar-thumb {
-        background: #cbd5e1;
-        border-radius: 3px;
-      }
-
-      .group-students::-webkit-scrollbar-thumb:hover {
-        background: #94a3b8;
       }
 
       /* STUDENT CARDS */
       .student-card {
         display: flex;
         align-items: center;
-        gap: 0.375rem;
-        padding: 0.375rem;
-        margin-bottom: 0.25rem;
+        gap: 0.5rem;
+        padding: 0.5rem;
+        margin-bottom: 0.375rem;
         border: 1px solid #e2e8f0;
         border-radius: 0.5rem;
         background: white;
         cursor: move;
         transition: all 0.2s ease;
-        font-size: 0.8rem;
       }
 
       .student-card:hover {
@@ -4891,25 +3525,16 @@
 
       .student-name {
         font-weight: 600;
-        font-size: 0.8rem;
+        font-size: 0.875rem;
         color: #1e293b;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-        flex-shrink: 1;
-        min-width: 0;
       }
 
       .student-meta {
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         color: #64748b;
-        white-space: nowrap;
-      }
-
-      .student-source {
-        font-size: 0.7rem;
-        color: #94a3b8;
-        white-space: nowrap;
       }
 
       .student-scores {
@@ -4919,13 +3544,12 @@
       }
 
       .score-badge {
-        padding: 0.2rem 0.4rem;
+        padding: 0.25rem 0.5rem;
         background: #f1f5f9;
         border-radius: 0.375rem;
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         font-weight: 600;
         color: #475569;
-        white-space: nowrap;
       }
 
       .score-badge.avg {
@@ -4956,190 +3580,6 @@
         transform: rotate(3deg);
       }
 
-      /* PASS CARDS */
-      .pass-card {
-        border: 1px solid #e2e8f0;
-        border-radius: 1rem;
-        background: #ffffff;
-        padding: 1rem;
-        display: flex;
-        flex-direction: column;
-        gap: 0.75rem;
-        transition: border-color 0.2s ease, box-shadow 0.2s ease;
-      }
-
-      .pass-card.active {
-        border-color: #6366f1;
-        box-shadow: 0 10px 30px -20px rgba(79, 70, 229, 0.7);
-      }
-
-      .pass-card__header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 1rem;
-      }
-
-      .pass-badge {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 2rem;
-        height: 2rem;
-        border-radius: 0.75rem;
-        background: #eef2ff;
-        color: #4f46e5;
-        font-weight: 700;
-        font-size: 0.875rem;
-      }
-
-      .pass-title {
-        font-size: 1rem;
-        font-weight: 700;
-        color: #1e293b;
-      }
-
-      .pass-meta {
-        font-size: 0.75rem;
-        color: #64748b;
-      }
-
-      .pass-card__body {
-        font-size: 0.875rem;
-        color: #475569;
-      }
-
-      .pass-chip {
-        display: inline-flex;
-        align-items: center;
-        padding: 0.25rem 0.75rem;
-        background: #f1f5f9;
-        color: #334155;
-        border-radius: 9999px;
-        font-size: 0.75rem;
-        font-weight: 600;
-      }
-
-      .meta-chip-group {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.5rem;
-      }
-
-      .meta-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.4rem;
-        padding: 0.35rem 0.85rem;
-        border-radius: 9999px;
-        background: #eef2ff;
-        color: #312e81;
-        font-size: 0.7rem;
-        font-weight: 600;
-        border: 1px solid rgba(99, 102, 241, 0.25);
-      }
-
-      .meta-chip i {
-        font-size: 0.7rem;
-      }
-
-      .meta-chip__hint {
-        margin-left: 0.25rem;
-        color: #4338ca;
-        font-weight: 500;
-      }
-
-      .pass-summary {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 0.75rem;
-      }
-
-      .pass-summary .summary-label {
-        font-size: 0.65rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        color: #94a3b8;
-        letter-spacing: 0.05em;
-      }
-
-      .pass-summary .summary-value {
-        font-size: 0.9rem;
-        font-weight: 700;
-        color: #1e293b;
-      }
-
-      .summary-hint {
-        display: block;
-        font-size: 0.65rem;
-        color: #64748b;
-        font-weight: 500;
-        margin-top: 0.15rem;
-      }
-
-      .pass-card__footer {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.5rem;
-      }
-
-      .pass-action {
-        padding: 0.4rem 0.85rem;
-        border-radius: 0.75rem;
-        font-size: 0.75rem;
-        font-weight: 600;
-        border: 1px solid #e2e8f0;
-        background: #f8fafc;
-        color: #334155;
-        display: inline-flex;
-        align-items: center;
-        gap: 0.4rem;
-        cursor: pointer;
-        transition: all 0.2s ease;
-      }
-
-      .pass-action:hover {
-        border-color: #6366f1;
-        color: #4338ca;
-        box-shadow: 0 8px 20px -18px rgba(79, 70, 229, 0.9);
-      }
-
-      .pass-action.primary {
-        background: linear-gradient(135deg, #6366f1, #8b5cf6);
-        color: white;
-        border-color: transparent;
-      }
-
-      .pass-action.danger {
-        background: #fee2e2;
-        color: #b91c1c;
-        border-color: #fecaca;
-      }
-
-      .class-assignment {
-        position: absolute;
-        top: 0.4rem;
-        right: 0.5rem;
-        font-size: 0.65rem;
-        font-weight: 600;
-        color: #4f46e5;
-        background: rgba(99, 102, 241, 0.08);
-        padding: 0.15rem 0.5rem;
-        border-radius: 9999px;
-      }
-
-      .class-checkbox-card {
-        position: relative;
-      }
-
-      .empty-pass-card {
-        text-align: center;
-        padding: 2rem 1.5rem;
-        border: 1px dashed #cbd5f5;
-        border-radius: 1rem;
-        background: #f8fafc;
-      }
-
       /* ACTION BUTTONS */
       .action-btn {
         display: inline-flex;
@@ -5167,15 +3607,6 @@
         border-top-color: #6366f1;
         border-radius: 50%;
         animation: spin 1s linear infinite;
-      }
-
-      .spinner-small {
-        width: 1.5rem;
-        height: 1.5rem;
-        border: 3px solid #cbd5f5;
-        border-top-color: #4f46e5;
-        border-radius: 50%;
-        animation: spin 0.8s linear infinite;
       }
 
       @keyframes spin {
@@ -5214,10 +3645,7 @@
     // Fonctions publiques pour la gestion des groupes temporaires
     saveTempGroupsUI,
     loadTempGroupsUI,
-    finalizeTempGroupsUI,
-    createSnapshotUI,
-    restoreSnapshotUI,
-    fetchSnapshotHistory
+    finalizeTempGroupsUI
   };
 
   // Injecter les styles
