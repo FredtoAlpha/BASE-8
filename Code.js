@@ -2568,29 +2568,62 @@ function saveTempGroups(payload) {
     // ÉTAPE PRÉALABLE : Déterminer le startNum (numéro de départ)
     var startNum = 1;
 
+    // ✅ SPRINT #1 FIX: Respecter le mode de persistance
     // Si offsetStart fourni explicitement (par UI), l'utiliser
     if (payload.offsetStart && payload.offsetStart > 0) {
       startNum = payload.offsetStart;
-      console.log('offsetStart fourni par UI: ' + startNum);
-    } else if (saveMode === 'replace') {
-      // Mode REPLACE: suppression des TEMP existants, recommencer à 1
-      console.log('Mode REPLACE: suppression des TEMP existants avec préfixe ' + typePrefix);
+      console.log('✅ offsetStart fourni par UI: ' + startNum);
+    } else if (saveMode === 'append') {
+      // Mode APPEND : CUMUL avec existants - Détecter le plus grand numéro (TEMP ou FIN)
+      var maxTempNum = 0;
+      var maxFinalNum = 0;
       var sheets = ss.getSheets();
+
+      for (var checkIdx = 0; checkIdx < sheets.length; checkIdx++) {
+        var shName = sheets[checkIdx].getName();
+        // Chercher max dans les TEMP (grBe1TEMP, grBe2TEMP...)
+        if (shName.startsWith(typePrefix) && shName.endsWith('TEMP')) {
+          var match = shName.match(/^[a-zA-Z]+(\d+)TEMP$/);
+          if (match) {
+            var num = parseInt(match[1], 10);
+            if (num > maxTempNum) maxTempNum = num;
+          }
+        }
+        // Chercher max dans les groupes finalisés (grBe1, grBe2...)
+        if (shName.startsWith(typePrefix) && !shName.endsWith('TEMP') && !shName.includes('_snapshot_')) {
+          var matchFin = shName.match(/^[a-zA-Z]+(\d+)$/);
+          if (matchFin) {
+            var numFin = parseInt(matchFin[1], 10);
+            if (numFin > maxFinalNum) maxFinalNum = numFin;
+          }
+        }
+      }
+
+      var maxExisting = Math.max(maxTempNum, maxFinalNum);
+      startNum = maxExisting + 1; // Commence à partir du suivant
+      console.log('✅ Mode APPEND: Max number existant (TEMP ou FIN): ' + maxExisting + ' → Nouveaux groupes: ' + startNum + '-' + (startNum + payload.groups.length - 1));
+    } else {
+      // Mode REPLACE: ATTENTION! Ne pas supprimer les groupes finalisés!
+      // Seulement supprimer les TEMP de cette série pour recréer
+      console.log('⚠️  Mode REPLACE: Suppression SEULEMENT des TEMP existants, préservation des groupes finalisés');
+      var sheets = ss.getSheets();
+      var tempToDelete = [];
+
       for (var delIdx = 0; delIdx < sheets.length; delIdx++) {
         var shName = sheets[delIdx].getName();
         if (shName.startsWith(typePrefix) && shName.endsWith('TEMP')) {
-          console.log('  Suppression: ' + shName);
-          ss.deleteSheet(sheets[delIdx]);
+          tempToDelete.push(sheets[delIdx]);
         }
       }
+
+      // Supprimer les TEMP identifiés
+      for (var d = 0; d < tempToDelete.length; d++) {
+        console.log('  Suppression TEMP: ' + tempToDelete[d].getName());
+        ss.deleteSheet(tempToDelete[d]);
+      }
+
       startNum = 1;
-      console.log('Groupes seront numérotés de ' + startNum + ' à ' + payload.groups.length);
-    } else {
-      // Mode APPEND : Détecter le plus grand numéro existant pour NUMÉROTATION CONTINUE
-      var maxExisting = getMaxGroupNumber_(ss, typePrefix);
-      startNum = maxExisting + 1; // Commence à partir du suivant
-      console.log('Mode APPEND: Max group number existant pour ' + typePrefix + ': ' + maxExisting);
-      console.log('Nouveaux groupes seront numérotés de ' + startNum + ' à ' + (startNum + payload.groups.length - 1));
+      console.log('✅ Groupes TEMP seront numérotés de ' + startNum + ' à ' + payload.groups.length);
     }
 
     // Déterminer combien de nouvelles feuilles il FAUDRA créer
@@ -2976,13 +3009,14 @@ function finalizeTempGroups(type, finalizeMode) {
     console.log('   Finalisation de ' + tempSheets.length + ' groupes...');
 
     if (finalizeMode === 'replace') {
-      // MODE REPLACE : Créer snapshots AVANT suppression, puis supprimer les anciens
-      console.log('   Mode REPLACE: création de snapshots puis suppression des anciens groupes finalisés');
+      // MODE REPLACE : Créer snapshots AVANT suppression, puis supprimer les anciens TEMP (pas les finalisés!)
+      console.log('   ✅ Mode REPLACE: création de snapshots puis suppression SEULEMENT des TEMP anciens');
       var finalSheets = [];
       for (var j = 0; j < sheets.length; j++) {
         var sh = sheets[j];
         var name = sh.getName();
-        if (name.startsWith(typePrefix) && !name.endsWith('TEMP')) {
+        // IMPORTANT: Chercher les groupes finalisés (pas snapshots, pas TEMP)
+        if (name.startsWith(typePrefix) && !name.endsWith('TEMP') && !name.includes('_snapshot_')) {
           finalSheets.push(sh);
         }
       }
@@ -3013,21 +3047,22 @@ function finalizeTempGroups(type, finalizeMode) {
       }
 
     } else if (finalizeMode === 'merge') {
-      // MODE MERGE : Créer snapshots AVANT modification, puis continuer numérotation
-      console.log('   Mode MERGE: création de snapshots puis préservation des anciens + numérotation continue');
+      // MODE MERGE : Créer snapshots AVANT modification, puis continuer numérotation SANS toucher aux anciens
+      console.log('   ✅ Mode MERGE: création de snapshots puis PRÉSERVATION des groupes finalisés + numérotation continue');
 
       // 🆕 SPRINT #4 : Créer snapshots des groupes existants avant merge (VERSIONING)
       var existingFinalSheets = [];
       for (var j = 0; j < sheets.length; j++) {
         var sh = sheets[j];
         var name = sh.getName();
-        if (name.startsWith(typePrefix) && !name.endsWith('TEMP')) {
+        // IMPORTANT: Chercher les groupes finalisés (pas snapshots, pas TEMP)
+        if (name.startsWith(typePrefix) && !name.endsWith('TEMP') && !name.includes('_snapshot_')) {
           existingFinalSheets.push(sh);
         }
       }
 
       if (existingFinalSheets.length > 0) {
-        console.log('   📸 Création de snapshots des groupes existants pour rollback...');
+        console.log('   📸 Création de snapshots des ' + existingFinalSheets.length + ' groupes existants pour rollback...');
         for (var k = 0; k < existingFinalSheets.length; k++) {
           var groupName = existingFinalSheets[k].getName();
           var snapshotResult = createGroupSnapshot(groupName);
@@ -3041,7 +3076,8 @@ function finalizeTempGroups(type, finalizeMode) {
       for (var n = 0; n < sheets.length; n++) {
         var sh = sheets[n];
         var name = sh.getName();
-        if (name.startsWith(typePrefix) && !name.endsWith('TEMP')) {
+        // IMPORTANT: Ne compter que les groupes finalisés (pas snapshots, pas TEMP)
+        if (name.startsWith(typePrefix) && !name.endsWith('TEMP') && !name.includes('_snapshot_')) {
           // Extraire le numéro de "grBe3"
           var match = name.match(/^[a-zA-Z]+(\d+)$/);
           if (match) {

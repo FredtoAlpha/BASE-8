@@ -1040,16 +1040,21 @@
     return `
       <div class="flex flex-col h-full">
         <!-- BANDEAU MODE CONTINUATION -->
-        ${state.persistMode && state.lastTempRange ? `
+        ${state.tempOffsetStart > 1 ? `
           <div class="flex-shrink-0 mb-6 bg-blue-100 border-l-4 border-blue-600 p-4 rounded">
             <p class="text-blue-900 font-bold text-lg">
               🔄 MODE CONTINUATION ACTIF
             </p>
-            <p class="text-blue-800 text-sm mt-1">
-              Groupes précédents: ${state.lastTempRange.typePrefix}${state.lastTempRange.min} → ${state.lastTempRange.typePrefix}${state.lastTempRange.max}
-            </p>
+            ${state.lastTempRange ? `
+              <p class="text-blue-800 text-sm mt-1">
+                Groupes précédents: ${getGroupPrefix()}${state.lastTempRange.min} → ${getGroupPrefix()}${state.lastTempRange.max} (${state.lastTempRange.count} groupes)
+              </p>
+            ` : ''}
             <p class="text-blue-700 text-sm font-semibold mt-2">
-              ✨ Prochains groupes: ${state.tempOffsetStart} → ${state.tempOffsetStart + state.generatedGroups.length - 1}
+              ✨ Prochains groupes: ${getGroupPrefix()}${state.tempOffsetStart} → ${getGroupPrefix()}${state.tempOffsetStart + state.generatedGroups.length - 1}
+            </p>
+            <p class="text-blue-700 text-xs mt-2 italic">
+              Sauvegarder → "Ajouter" pour continuer la série | "Remplacer" pour recommencer
             </p>
           </div>
         ` : ''}
@@ -1155,13 +1160,20 @@
 
     // Afficher le vrai numéro du groupe (en tenant compte de l'offset)
     const groupNumber = state.tempOffsetStart + index;
-    const groupLabel = group.name || `Groupe ${groupNumber}`;
+    const groupPrefix = getGroupPrefix();
+    const groupName = `${groupPrefix}${groupNumber}`;
+    const groupLabel = group.name || groupName;
 
     return `
       <div class="group-card" data-group-index="${index}">
         <div class="group-header ${GROUP_TYPES[state.groupType].color}">
-          <h4 class="group-title">${groupLabel}</h4>
-          <span class="group-count">${group.students.length} élèves</span>
+          <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+            <div>
+              <h4 class="group-title">${groupLabel}</h4>
+              <p style="font-size: 0.75rem; opacity: 0.8; margin-top: 0.25rem;">Code: <code>${groupName}</code></p>
+            </div>
+            <span class="group-count">${group.students.length} élèves</span>
+          </div>
         </div>
 
         <div class="group-stats">
