@@ -2161,39 +2161,91 @@
       return;
     }
 
-    const payload = {
-      type: state.groupType,
-      saveMode: state.saveMode,  // 'replace' | 'append'
-      config: {
-        selectedClasses: state.selectedClasses,
-        numGroups: state.numGroups,
-        ...(state.groupType === 'needs' && {
-          subject: state.selectedSubject,
-          distributionType: state.distributionType
-        }),
-        ...(state.groupType === 'language' && {
-          language: state.selectedLanguage
-        })
-      },
-      groups: state.generatedGroups,
-      timestamp: new Date().toISOString()
-    };
-
-    showToast('💾 Sauvegarde temporaire en cours...', 'info');
+    // D'abord vérifier s'il y a des TEMP existants pour ce type
+    showToast('Vérification des groupes existants...', 'info');
 
     google.script.run
-      .withSuccessHandler((result) => {
-        if (result.success) {
-          showToast(`✅ Groupes sauvegardés temporairement (gr${result.typePrefix}1TEMP, etc.)`, 'success');
-          console.log('[GroupsModule] Sauvegarde temp réussie:', result);
+      .withSuccessHandler((listResult) => {
+        // Si des TEMP existent, vérifier le mode utilisateur
+        if (listResult.success && listResult.count > 0) {
+          const existingInfo = `Groupes TEMP existants trouvés: ${listResult.minNumber} à ${listResult.maxNumber} (${listResult.count} groupes)`;
+          console.log(existingInfo);
+
+          // Si mode='replace', demander confirmation
+          if (state.saveMode === 'replace') {
+            const confirmReplace = confirm(
+              `⚠️ Mode REMPLACER activé!\n\n${existingInfo}\n\n` +
+              `Si vous continuez, vous PERDREZ ces ${listResult.count} groupes temporaires!\n\n` +
+              `Vos groupes seront renumérotés de 1 à ${state.generatedGroups.length}.\n\n` +
+              `Souhaitez-vous continuer?`
+            );
+            if (!confirmReplace) {
+              showToast('Sauvegarde annulée', 'warning');
+              return;
+            }
+          } else {
+            // Mode='append': informer l'utilisateur que ça va s'ajouter
+            showToast(
+              `Mode AJOUTER: vos groupes seront numérotés de ${listResult.maxNumber + 1} à ${listResult.maxNumber + state.generatedGroups.length}`,
+              'info'
+            );
+          }
         } else {
-          showToast(`Erreur: ${result.error}`, 'error');
+          // Aucun TEMP existant
+          console.log('Aucun groupe TEMP existant pour ce type');
         }
+
+        // Procéder à la sauvegarde
+        proceedWithSave();
       })
       .withFailureHandler(error => {
-        showToast(`Erreur de sauvegarde : ${error?.message || error}`, 'error');
+        console.error('Erreur listTempGroups:', error);
+        // En cas d'erreur, continuer quand même
+        showToast('Impossible de vérifier les groupes existants, sauvegarde directe...', 'warning');
+        proceedWithSave();
       })
-      .saveTempGroups(payload);
+      .listTempGroups(state.groupType);
+
+    function proceedWithSave() {
+      const payload = {
+        type: state.groupType,
+        saveMode: state.saveMode,  // 'replace' | 'append'
+        config: {
+          selectedClasses: state.selectedClasses,
+          numGroups: state.numGroups,
+          ...(state.groupType === 'needs' && {
+            subject: state.selectedSubject,
+            distributionType: state.distributionType
+          }),
+          ...(state.groupType === 'language' && {
+            language: state.selectedLanguage
+          })
+        },
+        groups: state.generatedGroups,
+        timestamp: new Date().toISOString()
+      };
+
+      showToast('💾 Sauvegarde temporaire en cours...', 'info');
+
+      google.script.run
+        .withSuccessHandler((result) => {
+          if (result.success) {
+            const modeLabel = result.saveMode === 'append' ? 'ajoutés' : 'enregistrés';
+            showToast(
+              `✅ Groupes ${modeLabel} de ${result.startNum} à ${result.endNum} ` +
+              `(${result.totalGroups} groupes, ${result.totalEleves} élèves)`,
+              'success'
+            );
+            console.log('[GroupsModule] Sauvegarde temp réussie:', result);
+          } else {
+            showToast(`Erreur: ${result.error}`, 'error');
+          }
+        })
+        .withFailureHandler(error => {
+          showToast(`Erreur de sauvegarde : ${error?.message || error}`, 'error');
+        })
+        .saveTempGroups(payload);
+    }
   }
 
   function finalizeTempGroupsUI() {
