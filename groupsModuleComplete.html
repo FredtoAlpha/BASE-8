@@ -1030,6 +1030,21 @@
 
     return `
       <div class="flex flex-col h-full">
+        <!-- BANDEAU MODE CONTINUATION -->
+        ${state.persistMode && state.lastTempRange ? `
+          <div class="flex-shrink-0 mb-6 bg-blue-100 border-l-4 border-blue-600 p-4 rounded">
+            <p class="text-blue-900 font-bold text-lg">
+              🔄 MODE CONTINUATION ACTIF
+            </p>
+            <p class="text-blue-800 text-sm mt-1">
+              Groupes précédents: ${state.lastTempRange.typePrefix}${state.lastTempRange.min} → ${state.lastTempRange.typePrefix}${state.lastTempRange.max}
+            </p>
+            <p class="text-blue-700 text-sm font-semibold mt-2">
+              ✨ Prochains groupes: ${state.tempOffsetStart} → ${state.tempOffsetStart + state.generatedGroups.length - 1}
+            </p>
+          </div>
+        ` : ''}
+
         <div class="flex-shrink-0 mb-6">
           <div class="flex items-center justify-between">
             <div>
@@ -1111,10 +1126,14 @@
   function renderGroupCard(group, index) {
     const stats = calculateGroupStats(group);
 
+    // Afficher le vrai numéro du groupe (en tenant compte de l'offset)
+    const groupNumber = state.tempOffsetStart + index;
+    const groupLabel = group.name || `Groupe ${groupNumber}`;
+
     return `
       <div class="group-card" data-group-index="${index}">
         <div class="group-header ${GROUP_TYPES[state.groupType].color}">
-          <h4 class="group-title">${group.name || `Groupe ${index + 1}`}</h4>
+          <h4 class="group-title">${groupLabel}</h4>
           <span class="group-count">${group.students.length} élèves</span>
         </div>
 
@@ -1935,6 +1954,37 @@
         console.log(`[GroupsModule] 📊 Total d'élèves chargés: ${state.students.length}`);
         console.log('[GroupsModule] 🔍 DEBUG - Premier élève normalisé:', state.students[0]);
         console.log('[GroupsModule] ✅ Scores normalisés pour tous les élèves');
+
+        // FIX 3 : Filtrer les élèves selon le type de groupe
+        // Langage : filtrer par LV2 sélectionnée
+        if (state.groupType === 'language' && state.selectedLanguage) {
+          const beforeFilter = state.students.length;
+          state.students = state.students.filter(s => {
+            const studentLV2 = (s.lv2 || s.LV2 || '').toString().toUpperCase().trim();
+            const selectedLV2 = state.selectedLanguage.toUpperCase().trim();
+            return studentLV2 === selectedLV2;
+          });
+          const afterFilter = state.students.length;
+          console.log(`[GroupsModule] 🌍 Filtre LV2 appliqué: ${beforeFilter} → ${afterFilter} élèves (LV2="${state.selectedLanguage}")`);
+
+          // Reconstruire la Map avec les élèves filtrés
+          state.studentsById = new Map(state.students.map(s => [s.id, s]));
+        }
+
+        // Options : filtrer par option sélectionnée (futur module)
+        if (state.groupType === 'option' && state.selectedOption) {
+          const beforeFilter = state.students.length;
+          state.students = state.students.filter(s => {
+            const studentOpt = (s.opt || s.OPT || '').toString().toUpperCase().trim();
+            const selectedOpt = state.selectedOption.toUpperCase().trim();
+            return studentOpt === selectedOpt;
+          });
+          const afterFilter = state.students.length;
+          console.log(`[GroupsModule] 🎯 Filtre OPT appliqué: ${beforeFilter} → ${afterFilter} élèves (OPT="${state.selectedOption}")`);
+
+          // Reconstruire la Map avec les élèves filtrés
+          state.studentsById = new Map(state.students.map(s => [s.id, s]));
+        }
 
         resolve(students);
       } catch (error) {
