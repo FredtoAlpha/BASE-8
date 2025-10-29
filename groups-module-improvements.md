@@ -24,3 +24,9 @@
 - Ajouter une prévisualisation PDF et proposer un export CSV enrichi (COM, TRA, PART, ABS) pour couvrir différents usages.
 - Permettre la comparaison côte à côte entre la version courante et une sauvegarde antérieure avant finalisation.
 - Intégrer des alertes guidées (par exemple, « parité déséquilibrée ») pour informer l'utilisateur des anomalies détectées.
+
+## 6. Audit de l'assistant HTML (structure en cinq étapes)
+- Le nouveau stepper en cinq étapes clarifie la navigation mais réinitialise entièrement `state.generatedGroups` à chaque retour en arrière, ce qui empêche de conserver plusieurs vagues successives de groupes.
+- Les actions « Sauvegarder » et « Finaliser » continuent d'appeler Apps Script sans fournir d'offset ni de mode « ajout », d'où la renumérotation systématique à partir de 1 et la suppression des onglets existants.
+- Le bouton secondaire « Recommencer » vide l'état et le cache, sans option pour revenir aux classes tout en conservant les groupes générés, ce qui complique les workflows multi-phases.
+- La détection des classes et la capture des élèves via le DOM fonctionnent, mais aucune vue récapitulative n'indique combien de groupes ont déjà été finalisés ni quel préfixe sera utilisé pour la prochaine vague.

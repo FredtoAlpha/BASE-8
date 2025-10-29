@@ -1,370 +1,45 @@
-# Status du Module groupsModuleComplete.html
-
-**État actuel**: ⚠️ **DÉMONSTRATIF / PRE-PRODUCTION**
-
-Ce document clarifie le périmètre actuel du module et les éléments critiques à finaliser avant un passage en production.
-
----
-
-## 📋 Périmètre Actuel
-
-### ✅ Implémenté et Fonctionnel
-
-#### 1. Gestion Multi-Vagues (Continuité)
-- **Toggle Replace/Append** : Choix entre remplacer ou ajouter une vague
-- **Détection TEMP** : Identification automatique des groupes TEMP existants
-- **Dialog Continuation** : Popup de choix pour continuer ou redémarrer une série
-- **Offset Dynamique** : Calcul et application du numéro de départ pour la nouvelle vague
-- **Numérotation Persistante** : Les groupes affichent le bon numéro (Groupe 4, 5, 6... pas 1, 2, 3...)
-- **Bandeau Visuel** : Affichage d'une zone bleue "MODE CONTINUATION ACTIF" avec range précédent et prochain
-
-**Limitations** :
-- ⚠️ La persistance des offsets dépend entièrement de l'état JS en session
-- ⚠️ Rechargement de page = perte de `state.lastTempRange` et `state.tempOffsetStart`
-- ⚠️ Pas d'historique sauvegardé en base (le cas "revenir 30 min plus tard" n'est pas supporté)
-
-#### 2. Filtrage par Spécialisation
-- **Filtrage LV2** : Les élèves sont filtrés par langue vivante (ESP, ITA, etc.) quand `groupType='language'`
-- **Structure Option** : Infrastructure en place pour filtrer par option (OPT) - module futur
-- **Logs de Debug** : Console affiche les réductions ("Filtre LV2 appliqué: 120 → 45 élèves")
-
-**Limitations** :
-- ⚠️ Filtre appliqué APRÈS chargement (pas de pré-filtrage à la source)
-- ⚠️ Pas de UI pour sélectionner/confirmer le filtre appliqué
-- ⚠️ Pas de statistiques pré/post filtre visibles à l'utilisateur
-
-#### 3. Gestion Quota Google Sheets
-- **Calcul Réaliste** : `totalCells_()` utilise `getLastRow() × getLastColumn()` (cellules utilisées, pas allouées)
-- **Shrinking Automatique** : Les onglets de groupe sont réduits aux dimensions strictement nécessaires
-- **Avoidance Pré-détection** : `willExceedCapForNewSheets_()` vérifie avant création
-
-**Limitations** :
-- ⚠️ Pas de gestion "soft limit" (alerte avant 8M cellules)
-- ⚠️ Pas de compression ou archivage automatique
-- ⚠️ Pas de migration vers plusieurs spreadsheets quand limite approchée
-
-#### 4. Interface Utilisateur
-- **5 Étapes Guidées** : Sélection type → classes → groupes → génération → visualisation
-- **Responsive Grid** : Adaptation du nombre de colonnes (1, 2 ou 3) selon le nombre de groupes
-- **Cartes Élèves** : Affichage complet (ID, nom, prénom, sexe, classe, scores F/M, comportements, LV2, SOURCE)
-- **Drag-Drop Reordering** : Réorganisation des élèves entre groupes via SortableJS
-
-**Limitations** :
-- ⚠️ Pas de prévisualisation PDF avant finalisation
-- ⚠️ Export CSV basique (pas de mapping personnalisé)
-- ⚠️ Statistiques non implémentées (bouton stub)
-- ⚠️ Pas de comparaison vague précédente ↔ vague courante
-
----
-
-## 🚨 Chantiers Critiques Avant Production
-
-### 1. **Persistance Multi-Vagues Robuste** (🔴 CRITIQUE)
-
-#### Problème
-Actuellement, l'offset et l'historique de continuation sont stockés **en mémoire JS uniquement** :
-- Rechargement page = perte totale
-- Fermeture du navigateur = perte totale
-- Reprise 30 min plus tard impossible
-
-#### Solution Requise
-```javascript
-// Backend (Code.js)
-function saveContinuationMetadata(type, metadata) {
-  // Sauvegarder dans PropertiesService ou feuille '_META'
-  // metadata = { lastOffset, lastRange, timestamp, user }
-}
-
-function loadContinuationMetadata(type) {
-  // Récupérer état de continuation persistant
-}
-
-// Frontend (groupsModuleComplete.html)
-// Au chargement: charger depuis server au lieu de chercher juste les TEMP
-```
-
-**Impact** : Bloquant pour workflow multi-jours
-
----
-
-### 2. **Filtrage LV2/Options avec UI et Validation** (🔴 CRITIQUE)
-
-#### Problème
-- Filtre appliqué silencieusement sans confirmation utilisateur
-- Pas de visibilité sur le nombre d'élèves avant/après
-- Pas de possibilité de modifier le filtre après chargement
-
-#### Solution Requise
-```html
-<!-- Ajouter après Étape 2 (sélection classes) -->
-<div class="filter-confirmation">
-  <p>Élèves chargés: <span id="before-filter">120</span></p>
-  <p>Après filtre LV2:  <span id="after-filter">45</span></p>
-  <label>
-    <input type="checkbox" id="confirm-filter"> J'ai vérifiée le filtre
-  </label>
-</div>
-```
-
-**Impact** : Risque d'erreur pédagogique (élèves oubliés sans raison)
-
----
-
-### 3. **Équilibrage Multi-Critères Robuste** (🟠 HAUTE)
-
-#### Problème
-Actuellement, l'algorithme de répartition utilise :
-- Un seul critère de score (F ou M ou moyenne)
-- Pas de pondération configurable
-- Pas de respect de contraintes (parité, distribution par classe d'origine)
-
-#### Solution Requise
-```javascript
-function generateGroupsWithOptimization(params) {
-  // 1. Score composite : (F×0.3 + M×0.3 + COM×0.2 + PART×0.2)
-  // 2. Contraintes :
-  //    - ±1 élève par groupe (effectifs proches)
-  //    - Parité F/M respectée (±1)
-  //    - Distribution SOURCE équilibrée (pas >2 d'une même classe)
-  // 3. Algorithme glouton avec échanges locaux
-  // 4. Tableau de bord : écart-type par métrique
-}
-```
-
-**Impact** : Groupes mal équilibrés = insatisfaction pédagogique
-
----
-
-### 4. **Traçabilité et Audit Complet** (🟠 HAUTE)
-
-#### Problème
-- Pas d'historique des sauvegarde (qui, quand, quoi)
-- Pas de versioning des groupes
-- Impossible de "revenir en arrière" sur une finalisation
-
-#### Solution Requise
-```javascript
-function logGroupOperation(operation, details) {
-  // Écrire dans feuille '_AUDIT_LOG' :
-  // Timestamp | Utilisateur | Opération | Type | NumGroupes | NbEleves | Détails
-  // Ex: 2025-10-29 14:32 | teacher@school.fr | SAVE_TEMP | language | 3-5 | 145 | ESP
-}
-
-function createGroupSnapshot(type) {
-  // Créer version "_v1_ESP", "_v2_ESP", etc.
-  // Garder historique des 5 dernières versions
-}
-```
-
-**Impact** : Conformité RGPD, responsabilité pédagogique
-
----
-
-### 5. **Gestion des Erreurs et Rollback** (🟠 HAUTE)
-
-#### Problème
-- Finalization partiellement échouée = données corrompues
-- Pas de possibilité d'annuler une opération
-- Pas de validation pré-finalisation
-
-#### Solution Requise
-```javascript
-function finalizeTempGroupsWithRollback(type, finalizeMode) {
-  try {
-    // Créer backup des sheets actuelles
-    createBackup(type);
-
-    // Tenter la finalisation
-    finalizeTempGroups(type, finalizeMode);
-
-    // Valider l'intégrité
-    validateFinalizedGroups(type);
-  } catch (e) {
-    // Restaurer depuis backup
-    restoreFromBackup(type);
-    throw e;
-  }
-}
-```
-
-**Impact** : Éviter corruptions de données critiques
-
----
-
-## 📊 Chantiers Moyens (À Faire Avant Premier Déploiement)
-
-### 6. Statistiques Dashboard
-- Écart-type des scores par groupe
-- Distribution F/M par groupe
-- Moyenne de participation par groupe
-- Décompte par SOURCE (classe d'origine)
-
-### 7. Export Avancé
-- **PDF** : Prévisualisation avant export
-- **CSV** : Mapping personnalisé des colonnes
-- **Google Sheets** : Export direct dans document externe
-
-### 8. Optimisation Performance
-- Virtualisation des listes longues (>500 élèves)
-- Indexation élèves par classe pour chargement rapide
-- Cache des feuilles FIN pour rechargement sans latence
-
----
-
-## 🔧 Chantiers Bas (Post-Production)
-
-### 9. Options et Autres Spécialisations
-- UI pour sélection option (actuellement stub)
-- Règles de filtrage spécifiques à chaque option
-- Module dédié aux options (comme specs l'indiquent)
-
-### 10. Algorithme Avancé (Scoring Multi-Critères)
-- Interface de configuration des poids
-- Simulation avant finalisation
-- Détection automatique du meilleur équilibre
-
-### 11. Intégration avec Modules Voisins
-- Liaison avec analytics (qui a reçu quel groupe)
-- Synchronisation avec modules de composition (BEsoin, OPTion)
-- Export vers planning ou emploi du temps
-
----
-
-## ✅ Checklist Avant Production
-
-- [ ] **1. Persistance multi-vagues** : Offset et historique sauvegardés en PropertiesService
-- [ ] **2. Filtrage LV2/Options** : UI de confirmation + affichage avant/après
-- [ ] **3. Équilibrage robuste** : Algorithme multi-critères + tableau dashboard
-- [ ] **4. Traçabilité complète** : Feuille audit + versioning des groupes
-- [ ] **5. Gestion erreurs** : Backup + rollback + validation pré-finalisation
-- [ ] **6. Statistiques** : Dashboard avec écart-type, parité, distribution
-- [ ] **7. Export avancé** : PDF, CSV personnalisé, Google Sheets
-- [ ] **8. Tests complets** : 50 élèves, 200 élèves, cas limites quota
-- [ ] **9. Documentation utilisateur** : Tutoriel, FAQ, troubleshooting
-- [ ] **10. Permissions & Sécurité** : Validations utilisateur, protection données
-
----
-
-## 📝 Résumé
-
-| Domaine | État | Blocker? | Timeline |
-|---------|------|----------|----------|
-| **Sélection classes & groupes** | ✅ OK | Non | - |
-| **Génération groupes basique** | ✅ OK | Non | - |
-| **Continuation multi-vagues** | ✅ DONE (Sprint #1) | Non | - |
-| **Filtrage LV2/Options** | ✅ DONE (Sprint #1) | Non | - |
-| **Équilibrage robuste** | ✅ DONE (Sprint #2) | Non | - |
-| **Statistiques & Dashboard** | ✅ DONE (Sprint #3) | Non | - |
-| **Versioning & Snapshots** | ✅ DONE (Sprint #4) | Non | - |
-| **Traçabilité audit** | ✅ DONE (Sprint #5) | Non | - |
-| **Export avancé** | 🟡 Partial (CSV/JSON) | Non | Post-Sprint #5 |
-
----
-
-## 🆕 Sprint #5 : Traçabilité Audit RGPD (✅ IMPLÉMENTÉ)
-
-### Fonctionnalités Livrées
-
-#### Backend (Code.js)
-- **`logGroupOperation(operation, groupType, metadata)`** - Journalise les opérations critiques
-  - Crée automatiquement `_AUDIT_LOG` si absent
-  - Enregistre : timestamp, utilisateur, opération, type, effectifs, mode, statut, détails
-  - Feuille masquée pour sécurité
-
-- **`getAuditLog(groupName, limit)`** - Récupère historique d'un groupe
-  - Filtre par nom de groupe
-  - Retour : liste des opérations triées (plus récentes en premier)
-
-- **`getAuditLogByDateRange(startDate, endDate)`** - Export par plage de dates
-  - Format ISO (YYYY-MM-DDTHH:MM:SSZ)
-  - Utile pour audits externes
-
-- **`exportAuditReport(groupName)`** - Rapport JSON complet
-  - Résumé: nombre de CREATE, SAVE, FINALIZE, RESTORE, DELETE
-  - Export téléchargeable pour conformité
-
-#### Opérations Tracées
-| Opération | Trigger | Détails |
-|-----------|---------|---------|
-| **SAVE** | `saveTempGroups()` | Range créée, nb élèves, mode (replace/append) |
-| **FINALIZE** | `finalizeTempGroups()` | Groupes finalisés, mode de finalisation |
-| **CREATE_SNAPSHOT** | `createGroupSnapshot()` | Nom snapshot, timestamp |
-| **RESTORE** | `restoreFromSnapshot()` | Snapshot restauré, groupe cible |
-| **DELETE** | `deleteSnapshot()` | Snapshot supprimé |
-
-#### Frontend (groupsModuleComplete.html)
-- **Bouton "📋 Historique"** - Affiche modal avec tableau d'audit
-  - Tableau scrollable avec colonnes : Date, Opération, Type, Utilisateur, Statut
-  - Code couleur : SUCCESS (vert) / FAILED (rouge)
-  - Badges couleurs par opération
-
-- **Fonction `showAuditHistory(groupName)`** - Récupère l'historique
-  - Appelle `getAuditLog()` backend
-  - Rend modal avec 50 dernières opérations
-
-- **Fonction `renderAuditDialog(groupName, logs)`** - Rendu UI
-  - Modal élégante avec en-tête vert
-  - Table sortable avec détails
-  - Bouton d'export JSON
-
-- **Fonction `exportAuditReportUI(groupName)`** - Export
-  - Génère rapport JSON côté backend
-  - Télécharge automatiquement : `audit_groupName_date.json`
-  - Format : opérations complètes + résumé
-
-### Conformité RGPD
-
-✅ **Traçabilité complète** :
-- Identité utilisateur (email)
-- Timestamp précis (ISO)
-- Opérations critiques enregistrées
-
-✅ **Audit exportable** :
-- Format JSON lisible
-- Dates, opérations, utilisateurs
-- Utile pour inspections
-
-✅ **Historique versioning** :
-- 5 dernières versions de chaque groupe
-- Snapshots horodatés
-- Possibilité de rollback total
-
-✅ **Sécurité des données** :
-- `_AUDIT_LOG` masquée
-- Historique versioning pour récupération
-- Pas d'exposition de données sensibles
-
-### Limitations Intentionnelles
-
-- ⚠️ Pas d'export RGPD automatique (requiert action utilisateur)
-- ⚠️ Pas de chiffrement du journal (dépend de Sheets)
-- ⚠️ Pas de signature numérique (hors scope)
-
----
-
-## 🎯 Recommandation
-
-**Le module est actuellement adapté pour** :
-✅ Démonstration et POC
-✅ Prototypage algorithmique
-✅ Tests avec groupes quelconques (scalabilité Sheets respectée)
-✅ **PRODUCTION** : Tous les 5 sprints implémentés !
-
-**Production-ready depuis Sprint #5 avec** :
-✅ Persistance multi-jours (Sprint #1 : PropertiesService)
-✅ Équilibrage robuste (Sprint #2 : Score composite + optimisation)
-✅ Validation statistique (Sprint #3 : Dashboard + alertes)
-✅ Versioning & Rollback (Sprint #4 : Historique 5 versions)
-✅ Traçabilité audit RGPD (Sprint #5 : _AUDIT_LOG + export JSON)
-
-**⚠️ Considérations post-Sprint #5** :
-- UI avancée (filtres dynamiques)
-- Export PDF sophistiqué
-- Intégration LMS
-- Autocomplétion performance optimization
-
----
-
-**Dernière mise à jour** : 2025-10-29
-**Responsable** : Module groupsModuleComplete.html
-**Prochaine revue** : Après implémentation chantier #1
+# État de `groupsModuleComplete.html`
+
+> **Mise à jour – validation novembre 2025 :** malgré les derniers dépôts, la combinaison `groupsModuleComplete.html` / `Code.js` ne peut toujours pas être validée. La sauvegarde continue d’écraser les vagues précédentes et l’interface ne matérialise aucun mode « continuation », ce qui contrevient directement au besoin exprimé de travailler en deux ou trois passes sur un même niveau.
+
+## Fonctionnalités livrées
+- Assistant en cinq étapes avec navigation primaire/secondaire et contenu dédié pour chaque écran, ce qui encadre correctement le parcours utilisateur existant.【F:groupsModuleComplete.html†L463-L520】
+- Tableau de bord final riche (statistiques, régénération, export, sauvegarde TEMP, finalisation) et cartes de groupes avec drag & drop, confirmant que le workflow actuel est exploitable pour une vague unique de génération.【F:groupsModuleComplete.html†L986-L1081】
+- Export PDF raccordé à `google.script.run.exportGroupsToPDF` et export CSV local permettant de récupérer les groupes générés sans quitter l'interface.【F:groupsModuleComplete.html†L2466-L2536】
+- Journal `_AUDIT_LOG` + snapshots versionnés : les opérations serveur sont tracées (`logGroupOperation`) et l'assistant expose un historique avec capture/restauration des groupes, limitant les régressions et facilitant le rollback manuel.【F:Code.js†L1935-L2097】【F:groupsModuleComplete.html†L1074-L1168】【F:groupsModuleComplete.html†L2166-L2405】
+
+## Bloquants pour une mise en production
+1. **Persistance multi-vagues fragile** — Aucun `persistMode` ni offset n'est mémorisé côté Apps Script : `saveTempGroups` purge systématiquement le préfixe concerné puis renumérote à partir de 1, ce qui empêche de sauvegarder durablement plusieurs vagues. Un stockage des offsets via `PropertiesService` reste à implémenter.【F:Code.js†L2204-L2289】
+2. **UI de filtrage incomplète** — L'assistant ne montre pas de vue "avant/après" ni de confirmation lorsque l'utilisateur change de mode de persistance ; l'état `state` n'expose pas d'indicateur visuel du mode courant, ce qui rend la continuité de série opaque.【F:groupsModuleComplete.html†L1006-L1081】
+3. **Équilibrage pédagogique limité** — L'algorithme reste heuristique (tri par score + snake draft ou découpage homogène) et ne tient pas compte d'un score composite ni d'un tableau de bord d'écarts, contrairement aux spécifications d'équilibrage multi-critères.【F:groupsModuleComplete.html†L1888-L2040】
+4. **Gestion d'erreurs rudimentaire** — Malgré la journalisation, un échec `saveGroup`/`finalizeTempGroups` n'engendre pas de rollback automatique des onglets ; seule la restauration manuelle via snapshot reste possible.【F:Code.js†L2204-L2338】【F:groupsModuleComplete.html†L2166-L2405】
+
+## Verdict production
+- ✅ **Utilisation démonstrative** : possible pour illustrer une génération unique de groupes, avec export PDF/CSV fonctionnels et drag & drop fluide.
+- ❌ **Mise en production** : déconseillée tant que la persistance multi-vagues, le filtrage LV2/Options et un minimum d'équilibrage pédagogique ne sont pas livrés.
+
+## Validation des fichiers (octobre 2025)
+- ❌ **`Code.js`** : `saveTempGroups` continue de purger toutes les feuilles `TEMP` du préfixe puis de renuméroter à partir de 1, ce qui écrase les vagues précédentes au lieu d'honorer un offset ou un mode « ajout ». `finalizeTempGroups` supprime aussi tous les onglets définitifs existants avant de renommer les `TEMP`, empêchant tout cumul de sessions.【F:Code.js†L2565-L2666】【F:Code.js†L2956-L3011】
+- ❌ **`groupsModuleComplete.html`** : l'état global ne comporte pas d'offset (`tempOffsetStart`, `persistMode`…) et les cartes de groupes affichent toujours `Groupe ${index+1}`. L'UI ne signale donc ni mode « continuation » ni numérotation décalée pour les vagues suivantes.【F:groupsModuleComplete.html†L82-L140】【F:groupsModuleComplete.html†L986-L1081】
+
+> **Conclusion :** les fichiers ne répondent pas encore au besoin de persistance multi-vagues décrit dans les spécifications ; ils restent valables pour une seule génération, mais **ne sont pas validés** pour un workflow multi-classes.
+
+## Recommandation
+Prioriser :
+1. Implémenter un mode de persistance avec offset stocké dans `PropertiesService` et un indicateur visuel clair dans l'UI pour sécuriser les séries multi-vagues.【F:Code.js†L2204-L2289】【F:groupsModuleComplete.html†L1006-L1081】
+2. Appliquer les filtres LV2/Options lors du chargement des élèves afin que chaque type de groupe reflète bien la sélection pédagogique effectuée dans l'assistant.【F:groupsModuleComplete.html†L1720-L1804】
+3. Étendre l'algorithme au-delà du tri + snake draft en ajoutant score composite, optimisations gloutonnes et dashboard de validation pour atteindre l'équilibre demandé.【F:groupsModuleComplete.html†L1888-L2040】
+4. Renforcer le rollback automatique (backup TEMP dédié) pour s'appuyer sur les snapshots en cas d'échec d'écriture/finalisation.【F:Code.js†L2204-L2338】【F:groupsModuleComplete.html†L2166-L2405】
+
+Une fois ces chantiers livrés et validés, revisiter la décision de passage en production.
+
+## Priorisation proposée des sprints
+
+| Sprint | Contenu | Raison de priorité | Risques si reporté |
+| --- | --- | --- | --- |
+| **#1 Persistance** | `saveContinuationMetadata` / `loadContinuationMetadata`, appels UI associés | Débloque le workflow multi-jours, évite l’écrasement des vagues précédentes, réponse directe au besoin métier exprimé | Perte de données entre sessions, impossibilité d’enchaîner plusieurs classes sans retraitement manuel |
+| **#3 Dashboard stats** | `renderStatisticsPanel`, calculs écart-type/parité | Permet de vérifier que les groupes générés respectent les attentes pédagogiques et donne une visibilité immédiate aux CPE/enseignants | Difficulté à valider la qualité des regroupements, méfiance vis-à-vis de l’outil |
+| **#2 Score composite** | `getCompositeScore`, nouvel algo + optimisation par échanges | Améliore réellement la qualité pédagogique une fois que la persistance et la validation visuelle sont en place | Génération encore aléatoire malgré le dashboard, besoin de retouches manuelles nombreuses |
+| **#3 Audit logging** | ✅ Livré : `_AUDIT_LOG`, `logGroupOperation`, snapshots RESTORE | Conserver ce socle et prévoir un monitoring des erreurs pour déclencher un rollback auto | Sans automatisme complémentaire, les restaurations restent manuelles |
+
+> **Conclusion :** démarrer par le sprint de persistance, enchainer avec le tableau de bord de statistiques pour donner du feedback aux utilisateurs, puis améliorer l’algorithme via le score composite. La journalisation peut débuter en parallèle une fois la persistance stabilisée.

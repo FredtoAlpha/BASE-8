@@ -2323,6 +2323,343 @@ function getGroups() {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  JOURNALISATION & SNAPSHOTS DES GROUPES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const GROUPS_AUDIT_SHEET = '_AUDIT_LOG';
+const GROUPS_SNAPSHOT_SHEET = '_GROUP_SNAPSHOTS';
+const GROUPS_MAX_SNAPSHOTS_PER_TYPE = 5;
+
+function ensureSheet_(name, headers, options) {
+  const opts = options || {};
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(name);
+
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    if (opts.hidden !== false) {
+      sheet.hideSheet();
+    }
+  }
+
+  if (headers && headers.length) {
+    const lastRow = sheet.getLastRow();
+    if (lastRow === 0) {
+      const headerRange = sheet.getRange(1, 1, 1, headers.length);
+      headerRange.setValues([headers]);
+      headerRange.setFontWeight('bold').setBackground('#111827').setFontColor('#ffffff');
+      sheet.setFrozenRows(1);
+    }
+  }
+
+  return sheet;
+}
+
+function ensureAuditLogSheet_() {
+  const headers = [
+    'TIMESTAMP',
+    'OPERATION',
+    'TYPE',
+    'PREFIX',
+    'GROUP_COUNT',
+    'STATUS',
+    'MESSAGE',
+    'METADATA_JSON',
+    'SNAPSHOT_ID',
+    'AUTHOR'
+  ];
+
+  return ensureSheet_(GROUPS_AUDIT_SHEET, headers, { hidden: true });
+}
+
+function ensureSnapshotSheet_() {
+  const headers = [
+    'SNAPSHOT_ID',
+    'TIMESTAMP',
+    'TYPE',
+    'PREFIX',
+    'GROUP_COUNT',
+    'METADATA_JSON',
+    'GROUPS_JSON',
+    'AUTHOR'
+  ];
+
+  return ensureSheet_(GROUPS_SNAPSHOT_SHEET, headers, { hidden: true });
+}
+
+function getActiveUserEmail_() {
+  try {
+    const email = Session.getActiveUser()?.getEmail?.();
+    return email || '';
+  } catch (e) {
+    console.warn('⚠️ Impossible de récupérer l\'email utilisateur:', e);
+    return '';
+  }
+}
+
+function logGroupOperation(entry) {
+  try {
+    const sheet = ensureAuditLogSheet_();
+    const timestamp = new Date();
+    const row = [
+      timestamp,
+      entry?.operation || 'UNKNOWN',
+      entry?.type || '',
+      entry?.prefix || '',
+      entry?.groupCount || 0,
+      entry?.status || 'INFO',
+      entry?.message || '',
+      entry?.metadata ? JSON.stringify(entry.metadata) : '',
+      entry?.snapshotId || '',
+      getActiveUserEmail_()
+    ];
+
+    sheet.appendRow(row);
+  } catch (e) {
+    console.error('❌ Erreur logGroupOperation:', e);
+  }
+}
+
+function pruneSnapshotsByType_(type) {
+  try {
+    const sheet = ensureSnapshotSheet_();
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return;
+
+    const header = data[0];
+    const rows = data.slice(1);
+    const typeIdx = header.indexOf('TYPE');
+    const timestampIdx = header.indexOf('TIMESTAMP');
+
+    if (typeIdx === -1 || timestampIdx === -1) return;
+
+    const entries = rows
+      .map((row, idx) => ({
+        rowNumber: idx + 2,
+        type: row[typeIdx],
+        timestamp: row[timestampIdx] instanceof Date ? row[timestampIdx] : new Date(row[timestampIdx])
+      }))
+      .filter(entry => !type || entry.type === type)
+      .sort((a, b) => a.timestamp - b.timestamp);
+
+    if (entries.length <= GROUPS_MAX_SNAPSHOTS_PER_TYPE) {
+      return;
+    }
+
+    const toDelete = entries.slice(0, entries.length - GROUPS_MAX_SNAPSHOTS_PER_TYPE);
+    toDelete.reverse().forEach(entry => {
+      try {
+        sheet.deleteRow(entry.rowNumber);
+      } catch (error) {
+        console.error('❌ Erreur suppression snapshot obsolète:', error);
+      }
+    });
+  } catch (e) {
+    console.error('❌ Erreur pruneSnapshotsByType_:', e);
+  }
+}
+
+function normalizeSnapshotStudent_(header, row) {
+  const normalizedHeader = header.map(h => String(h).toUpperCase().trim());
+  const getValue = key => {
+    const idx = normalizedHeader.indexOf(key);
+    if (idx === -1) return '';
+    return row[idx] !== undefined ? row[idx] : '';
+  };
+
+  const scores = {
+    F: getValue('SCORE_F') || getValue('F'),
+    M: getValue('SCORE_M') || getValue('M'),
+    COM: getValue('COM'),
+    TRA: getValue('TRA'),
+    PART: getValue('PART'),
+    ABS: getValue('ABS')
+  };
+
+  return {
+    id: getValue('ID_ELEVE') || getValue('ID'),
+    nom: getValue('NOM'),
+    prenom: getValue('PRENOM'),
+    sexe: getValue('SEXE'),
+    classe: getValue('CLASSE'),
+    lv2: getValue('LV2'),
+    opt: getValue('OPT'),
+    source: getValue('SOURCE'),
+    scores: scores,
+    com: scores.COM,
+    tra: scores.TRA,
+    part: scores.PART,
+    abs: scores.ABS
+  };
+}
+
+function createGroupSnapshot(request) {
+  try {
+    if (!request || !Array.isArray(request.groups)) {
+      return { success: false, error: 'Payload snapshot invalide (groups manquants)' };
+    }
+
+    const sheet = ensureSnapshotSheet_();
+    const timestamp = new Date();
+    const snapshotId = `${request.type || 'grp'}_${timestamp.getTime()}`;
+    const metadata = request.metadata || request.config || {};
+    const payload = {
+      type: request.type || '',
+      prefix: request.prefix || '',
+      config: metadata,
+      groups: request.groups.map((group, index) => ({
+        name: group.name || `Groupe ${index + 1}`,
+        students: Array.isArray(group.students) ? group.students : []
+      }))
+    };
+
+    sheet.appendRow([
+      snapshotId,
+      timestamp,
+      payload.type,
+      payload.prefix,
+      payload.groups.length,
+      JSON.stringify(payload.config || {}),
+      JSON.stringify(payload.groups || []),
+      getActiveUserEmail_()
+    ]);
+
+    pruneSnapshotsByType_(payload.type);
+
+    logGroupOperation({
+      operation: 'CREATE_SNAPSHOT',
+      type: payload.type,
+      prefix: payload.prefix,
+      groupCount: payload.groups.length,
+      status: 'SUCCESS',
+      message: 'Snapshot créé',
+      metadata: payload.config,
+      snapshotId: snapshotId
+    });
+
+    return {
+      success: true,
+      snapshotId: snapshotId,
+      timestamp: timestamp.toISOString(),
+      type: payload.type,
+      groupCount: payload.groups.length
+    };
+  } catch (e) {
+    console.error('❌ Erreur createGroupSnapshot:', e);
+    logGroupOperation({
+      operation: 'CREATE_SNAPSHOT',
+      status: 'ERROR',
+      message: e.toString()
+    });
+    return { success: false, error: e.toString() };
+  }
+}
+
+function listGroupSnapshots(params) {
+  try {
+    const sheet = ensureSnapshotSheet_();
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) {
+      return { success: true, snapshots: [] };
+    }
+
+    const header = data[0];
+    const rows = data.slice(1);
+    const typeFilter = params?.type || null;
+
+    const idx = {
+      id: header.indexOf('SNAPSHOT_ID'),
+      timestamp: header.indexOf('TIMESTAMP'),
+      type: header.indexOf('TYPE'),
+      prefix: header.indexOf('PREFIX'),
+      count: header.indexOf('GROUP_COUNT'),
+      metadata: header.indexOf('METADATA_JSON')
+    };
+
+    const snapshots = rows
+      .map(row => ({
+        snapshotId: row[idx.id],
+        timestamp: row[idx.timestamp] instanceof Date ? row[idx.timestamp].toISOString() : new Date(row[idx.timestamp]).toISOString(),
+        type: row[idx.type],
+        prefix: row[idx.prefix],
+        groupCount: row[idx.count],
+        metadata: row[idx.metadata] ? JSON.parse(row[idx.metadata]) : {}
+      }))
+      .filter(snap => !typeFilter || snap.type === typeFilter)
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+    return {
+      success: true,
+      snapshots: snapshots.slice(0, GROUPS_MAX_SNAPSHOTS_PER_TYPE)
+    };
+  } catch (e) {
+    console.error('❌ Erreur listGroupSnapshots:', e);
+    return { success: false, error: e.toString(), snapshots: [] };
+  }
+}
+
+function restoreFromSnapshot(params) {
+  try {
+    if (!params || !params.snapshotId) {
+      return { success: false, error: 'snapshotId manquant' };
+    }
+
+    const sheet = ensureSnapshotSheet_();
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) {
+      return { success: false, error: 'Aucun snapshot enregistré' };
+    }
+
+    const header = data[0];
+    const rows = data.slice(1);
+    const idIdx = header.indexOf('SNAPSHOT_ID');
+    const metadataIdx = header.indexOf('METADATA_JSON');
+    const groupsIdx = header.indexOf('GROUPS_JSON');
+    const typeIdx = header.indexOf('TYPE');
+    const prefixIdx = header.indexOf('PREFIX');
+    const timestampIdx = header.indexOf('TIMESTAMP');
+
+    const row = rows.find(r => r[idIdx] === params.snapshotId);
+    if (!row) {
+      return { success: false, error: 'Snapshot introuvable' };
+    }
+
+    const metadata = row[metadataIdx] ? JSON.parse(row[metadataIdx]) : {};
+    const groups = row[groupsIdx] ? JSON.parse(row[groupsIdx]) : [];
+
+    logGroupOperation({
+      operation: 'RESTORE_SNAPSHOT',
+      type: row[typeIdx],
+      prefix: row[prefixIdx],
+      groupCount: Array.isArray(groups) ? groups.length : 0,
+      status: 'SUCCESS',
+      message: `Snapshot ${params.snapshotId} restauré`,
+      metadata: metadata,
+      snapshotId: params.snapshotId
+    });
+
+    return {
+      success: true,
+      snapshotId: params.snapshotId,
+      type: row[typeIdx],
+      prefix: row[prefixIdx],
+      timestamp: row[timestampIdx] instanceof Date ? row[timestampIdx].toISOString() : new Date(row[timestampIdx]).toISOString(),
+      metadata: metadata,
+      groups: groups
+    };
+  } catch (e) {
+    console.error('❌ Erreur restoreFromSnapshot:', e);
+    logGroupOperation({
+      operation: 'RESTORE_SNAPSHOT',
+      status: 'ERROR',
+      message: e.toString(),
+      snapshotId: params?.snapshotId
+    });
+    return { success: false, error: e.toString() };
+  }
+}
+
 /**
  * Sauvegarde un groupe dans un onglet
  *
@@ -2347,9 +2684,6 @@ function saveGroup(groupName, data, options = {}) {
       sh.clear();
     } else {
       sh = ss.insertSheet(groupName);
-      // CORRECTIF C : Redimensionner immédiatement après création
-      // evite l'allocation par défaut de 1000×26 cellules
-      shrinkSheet_(sh, 2, 14);
     }
 
     let header;
@@ -2419,6 +2753,22 @@ function saveGroup(groupName, data, options = {}) {
 
     // --- Suite de la fonction (écriture) ---
 
+    rowData = rowData || [];
+
+    const requiredCols = Math.max(header.length, 1);
+    const requiredRows = Math.max(rowData.length + 1, 2); // Header + au moins 1 ligne vide
+
+    // S'assurer que la feuille a la taille minimale nécessaire avant l'écriture
+    const currentCols = sh.getMaxColumns();
+    if (currentCols < requiredCols) {
+      sh.insertColumnsAfter(currentCols, requiredCols - currentCols);
+    }
+
+    const currentRows = sh.getMaxRows();
+    if (currentRows < requiredRows) {
+      sh.insertRowsAfter(currentRows, requiredRows - currentRows);
+    }
+
     // Écrire l'en-tête
     sh.getRange(1, 1, 1, header.length).setValues([header]);
 
@@ -2440,12 +2790,18 @@ function saveGroup(groupName, data, options = {}) {
     headerRange.setBackground('#5b21b6').setFontColor('#ffffff').setFontWeight('bold');
     sh.setFrozenRows(1);
 
-    // CORRECTIF C : Redimensionner APRÈS écriture avec les vraies dimensions
-    const rowsWritten = 1 + rowData.length; // 1 header + data rows
-    const colsWritten = header.length;
-    shrinkSheet_(sh, rowsWritten, colsWritten);
+    // Réduire la feuille au strict nécessaire pour ne pas exploser le quota de cellules
+    const extraCols = sh.getMaxColumns() - requiredCols;
+    if (extraCols > 0) {
+      sh.deleteColumns(requiredCols + 1, extraCols);
+    }
 
-    console.log(`✅ Groupe ${groupName} sauvegardé avec ${data.length} lignes (dimensions: ${rowsWritten} lignes × ${colsWritten} colonnes).`);
+    const extraRows = sh.getMaxRows() - requiredRows;
+    if (extraRows > 0) {
+      sh.deleteRows(requiredRows + 1, extraRows);
+    }
+
+    console.log(`✅ Groupe ${groupName} sauvegardé avec ${data.length} lignes.`);
     return { success: true, message: `Groupe ${groupName} sauvegardé`, count: data.length };
 
   } catch (e) {
@@ -2746,6 +3102,49 @@ function extractGroupingIdFromSheet(sheetName) {
  * Payload: { type, groupingId, saveMode, offsetStart, groups[], ... }
  * ES5-compatible : pas de const/let, pas d'underscores, pas d'emoji côté serveur.
  */
+const CONTINUATION_METADATA_PREFIX = 'GROUPS_CONTINUATION_';
+
+function loadContinuationMetadata_(typePrefix) {
+  try {
+    const props = PropertiesService.getDocumentProperties();
+    const raw = props.getProperty(CONTINUATION_METADATA_PREFIX + typePrefix);
+    if (!raw) {
+      return {
+        lastTempIndex: 0,
+        lastFinalIndex: 0,
+        lastTempRange: null,
+        lastFinalRange: null,
+        lastPersistMode: 'replace',
+        lastUpdated: null
+      };
+    }
+    const parsed = JSON.parse(raw);
+    return parsed || {};
+  } catch (error) {
+    console.warn('⚠️ loadContinuationMetadata_ - parse error:', error);
+    return {};
+  }
+}
+
+function saveContinuationMetadata_(typePrefix, metadata) {
+  try {
+    const props = PropertiesService.getDocumentProperties();
+    props.setProperty(
+      CONTINUATION_METADATA_PREFIX + typePrefix,
+      JSON.stringify(metadata || {})
+    );
+  } catch (error) {
+    console.warn('⚠️ saveContinuationMetadata_ - error:', error);
+  }
+}
+
+function extractGroupIndex_(sheetName, prefix) {
+  const regex = new RegExp('^' + prefix + '(\\d+)(TEMP)?$');
+  const match = sheetName.match(regex);
+  if (!match) return null;
+  return parseInt(match[1], 10);
+}
+
 function saveTempGroups(payload) {
   try {
     if (!payload || !Array.isArray(payload.groups)) {
@@ -2812,41 +3211,66 @@ function saveTempGroups(payload) {
         }
       }
 
-      var maxExisting = Math.max(maxTempNum, maxFinalNum);
-      startNum = maxExisting + 1;
-      console.log('✅ Mode APPEND (ce regroupement): Max number existant: ' + maxExisting + ' → Nouveaux groupes: ' + startNum + '-' + (startNum + payload.groups.length - 1));
-    } else {
-      // Mode REPLACE: Supprimer SEULEMENT les TEMP DE CE REGROUPEMENT
-      console.log('⚠️ Mode REPLACE (ce regroupement): Suppression SEULEMENT des TEMP de ' + shortGroupingId);
-      var sheets = ss.getSheets();
-      var tempToDelete = [];
+    const persistMode = payload.persistMode === 'continue' ? 'continue' : 'replace';
+    const requestedOffset = typeof payload.offsetStart === 'number' ? payload.offsetStart : parseInt(payload.offsetStart, 10);
 
-      for (var delIdx = 0; delIdx < sheets.length; delIdx++) {
-        var shName = sheets[delIdx].getName();
-        var shGroupingId = extractGroupingIdFromSheet(shName);
-        // 🆕 SPRINT #6: Supprimer SEULEMENT les TEMP de ce regroupement
-        if (shGroupingId === shortGroupingId && shName.endsWith('TEMP')) {
-          tempToDelete.push(sheets[delIdx]);
-        }
-      }
+    console.log('📋 saveTempGroups - Début de sauvegarde temporaire');
+    console.log('   Type: ' + payload.type);
+    console.log('   Prefix: ' + typePrefix);
+    console.log('   PersistMode: ' + persistMode);
+    console.log('   Nombre de groupes: ' + payload.groups.length);
 
       for (var d = 0; d < tempToDelete.length; d++) {
         console.log('  Suppression TEMP: ' + tempToDelete[d].getName());
         ss.deleteSheet(tempToDelete[d]);
       }
 
-      startNum = 1;
-      console.log('✅ TEMP de ' + shortGroupingId + ' seront numérotés de ' + startNum + ' à ' + payload.groups.length);
-    }
+    const metadata = {
+      config: payload.config || {},
+      timestamp: payload.timestamp,
+      persistMode: persistMode
+    };
 
-    // Déterminer combien de nouvelles feuilles il FAUDRA créer
-    var newSheetsNeeded = 0;
-    for (var idxCheck = 0; idxCheck < payload.groups.length; idxCheck++) {
-      var checkName = getTempSheetName(typePrefix, groupingId, startNum + idxCheck);
-      if (!ss.getSheetByName(checkName)) {
-        newSheetsNeeded++;
+    const existingTempSheets = ss.getSheets().filter(sh => {
+      const name = sh.getName();
+      return name.startsWith(typePrefix) && name.endsWith('TEMP');
+    });
+
+    let offsetStart = Number.isFinite(requestedOffset) && requestedOffset > 0 ? requestedOffset : 1;
+
+    if (persistMode === 'replace') {
+      existingTempSheets.forEach(sh => {
+        console.log('   🗑️ Suppression ancien TEMP: ' + sh.getName());
+        ss.deleteSheet(sh);
+      });
+    } else {
+      const conflictingSheets = existingTempSheets.filter(sh => {
+        const idx = extractGroupIndex_(sh.getName(), typePrefix);
+        return typeof idx === 'number' && idx >= offsetStart;
+      });
+
+      conflictingSheets.forEach(sh => {
+        console.log('   🔄 Remplacement TEMP existant: ' + sh.getName());
+        ss.deleteSheet(sh);
+      });
+
+      const maxExisting = existingTempSheets.reduce((max, sh) => {
+        const idx = extractGroupIndex_(sh.getName(), typePrefix);
+        return typeof idx === 'number' ? Math.max(max, idx) : max;
+      }, 0);
+
+      if (offsetStart <= maxExisting) {
+        offsetStart = maxExisting + 1;
+        console.log('   ℹ️ Offset ajusté pour éviter les collisions: ' + offsetStart);
       }
     }
+
+    const createdSheets = [];
+    const createdIndexes = [];
+
+    // Sauvegarder chaque groupe avec suffix TEMP
+    for (let idx = 0; idx < payload.groups.length; idx++) {
+      const group = payload.groups[idx];
 
     // --- ÉTAPE 1 : sécurité quota AVANT de créer des nouvelles feuilles
     if (newSheetsNeeded > 0) {
@@ -2869,13 +3293,22 @@ function saveTempGroups(payload) {
     for (var i = 0; i < payload.groups.length; i++) {
       var group = payload.groups[i];
       if (!group || !Array.isArray(group.students)) {
-        console.warn('Groupe ' + i + ' invalide');
-        return { success: false, error: 'Groupe ' + i + ' invalide' };
+        console.warn('   ⚠️ Groupe ' + idx + ' invalide');
+        logGroupOperation({
+          operation: 'SAVE_TEMP_GROUPS',
+          type: payload.type,
+          prefix: typePrefix,
+          groupCount: payload.groups.length,
+          status: 'ERROR',
+          message: 'Groupe invalide détecté pendant la sauvegarde',
+          metadata: { index: idx }
+        });
+        return { success: false, error: 'Groupe ' + idx + ' invalide' };
       }
 
-      var groupNum = startNum + i;
-      var tempGroupName = getTempSheetName(typePrefix, groupingId, groupNum); // 🆕 Use new naming
-      var studentsData = group.students;
+      const currentIndex = offsetStart + idx;
+      const tempGroupName = typePrefix + currentIndex + 'TEMP';
+      const studentsData = group.students;
 
       console.log(tempGroupName + ': ' + studentsData.length + ' élèves');
       if (studentsData.length > 0) {
@@ -2888,15 +3321,29 @@ function saveTempGroups(payload) {
         );
       }
 
-      // NOTE: saveGroup(name, studentsData, {isFullData:true})
-      // -> si name existe déjà : clear + rewrite
-      // -> sinon : insertSheet(name) puis write
-      var result = saveGroup(tempGroupName, studentsData, { isFullData: true });
-      console.log('Résultat saveGroup:', result);
+      // Appeler saveGroup avec le nom TEMP et les données complètes
+      const existing = ss.getSheetByName(tempGroupName);
+      if (existing) {
+        console.log('   ♻️ Suppression feuille TEMP existante avant écriture: ' + tempGroupName);
+        ss.deleteSheet(existing);
+      }
 
-      if (!result || !result.success) {
-        var errMsg = result && result.error ? result.error : 'saveGroup() a échoué';
-        console.error('ERREUR : saveGroup a échoué pour ' + tempGroupName + ' -> ' + errMsg);
+      const result = saveGroup(tempGroupName, studentsData, { isFullData: true, index: currentIndex });
+      console.log('      📊 Résultat saveGroup:', result);
+
+      // 🔴 BUG FIX : Si saveGroup échoue, ARRÊTER IMMÉDIATEMENT et signaler l'erreur
+      if (!result.success) {
+        console.error('❌ ERREUR CRITIQUE : saveGroup a échoué pour ' + tempGroupName);
+        console.error('   Raison:', result.error);
+        logGroupOperation({
+          operation: 'SAVE_TEMP_GROUPS',
+          type: payload.type,
+          prefix: typePrefix,
+          groupCount: payload.groups.length,
+          status: 'ERROR',
+          message: 'saveGroup a échoué',
+          metadata: { tempGroupName: tempGroupName, error: result.error }
+        });
         return {
           success: false,
           error: 'Impossible de créer ' + tempGroupName + ': ' + errMsg
@@ -2905,21 +3352,21 @@ function saveTempGroups(payload) {
 
       results.push({
         tempGroupName: tempGroupName,
-        groupIndex: groupNum,
-        savedCount: studentsData.length
+        index: currentIndex,
+        ...result
       });
 
       totalEleves += studentsData.length;
+      createdSheets.push(tempGroupName);
+      createdIndexes.push(currentIndex);
     }
 
-    // --- ÉTAPE 3 : masquer les feuilles TEMP qu'on vient d'écrire
-    for (var j = 0; j < payload.groups.length; j++) {
-      var groupNum = startNum + j;
-      var nm = getTempSheetName(typePrefix, groupingId, groupNum); // 🆕 Use new naming
-      var shToHide = ss.getSheetByName(nm);
-      if (shToHide) {
-        shToHide.hideSheet();
-        console.log('Masqué:', nm);
+    // Cacher uniquement les onglets TEMP créés pendant cette sauvegarde
+    createdSheets.forEach(name => {
+      const sh = ss.getSheetByName(name);
+      if (sh) {
+        sh.hideSheet();
+        console.log('   👁️ Masqué: ' + name);
       }
     }
 
@@ -2954,7 +3401,10 @@ function saveTempGroups(payload) {
       }
     });
 
-    return {
+    const offsetEnd = createdIndexes.length > 0 ? Math.max.apply(null, createdIndexes) : offsetStart + (payload.groups.length || 0) - 1;
+    const nextOffset = offsetEnd + 1;
+    const nowIso = new Date().toISOString();
+    const response = {
       success: true,
       message: 'Groupes sauvegardés temporairement (isolation par regroupement)',
       typePrefix: typePrefix,
@@ -2965,16 +3415,56 @@ function saveTempGroups(payload) {
       totalGroups: payload.groups.length,
       totalEleves: totalEleves,
       results: results,
-      timestamp: new Date().toISOString(),
-      auditLogged: auditResult.success
+      timestamp: nowIso,
+      offsetStart,
+      offsetEnd,
+      persistMode,
+      createdRange: createdIndexes.length > 0 ? { start: Math.min.apply(null, createdIndexes), end: offsetEnd } : null,
+      createdSheets,
+      nextOffset
     };
 
+    const continuation = loadContinuationMetadata_(typePrefix);
+    const range = response.createdRange || (payload.groups.length > 0
+      ? { start: offsetStart, end: offsetEnd }
+      : null);
+
+    const updatedMetadata = {
+      ...continuation,
+      lastTempIndex: Math.max(continuation?.lastTempIndex || 0, offsetEnd),
+      lastTempRange: range,
+      lastPersistMode: persistMode,
+      lastUpdated: nowIso,
+      lastTempUpdated: nowIso,
+      lastConfig: payload.config || {},
+      lastPassId: payload.passId || '',
+      lastPassName: payload.passName || ''
+    };
+
+    saveContinuationMetadata_(typePrefix, updatedMetadata);
+
+    logGroupOperation({
+      operation: 'SAVE_TEMP_GROUPS',
+      type: payload.type,
+      prefix: typePrefix,
+      groupCount: payload.groups.length,
+      status: 'SUCCESS',
+      message: 'Sauvegarde temporaire effectuée',
+      metadata: { ...metadata, createdSheets },
+      snapshotId: payload.snapshotId || ''
+    });
+
+    return response;
   } catch (e) {
-    console.error('Erreur saveTempGroups:', e.toString());
-    logGroupOperation('SAVE', payload.type || 'unknown', {
-      groupName: payload.type || 'unknown',
-      status: 'FAILED',
-      details: { error: e.toString() }
+    console.error('❌ Erreur saveTempGroups:', e.toString());
+    logGroupOperation({
+      operation: 'SAVE_TEMP_GROUPS',
+      type: payload?.type,
+      prefix: payload?.type === 'needs' ? 'grBe' : payload?.type === 'language' ? 'grLv' : 'grOp',
+      groupCount: Array.isArray(payload?.groups) ? payload.groups.length : 0,
+      status: 'ERROR',
+      message: e.toString(),
+      metadata: payload?.config || {}
     });
     return { success: false, error: e.toString() };
   }
@@ -3031,69 +3521,109 @@ function getTempGroupsInfo() {
 }
 
 /**
- * Liste les feuilles TEMP existantes pour un type donné avec numérotation continue
- * Utile pour afficher le statut: "Vous avez grBe1TEMP à grBe7TEMP (7 groupes)"
- * ES5-compatible
+ * Génère un PDF récapitulatif des groupes et renvoie le fichier encodé en base64.
+ * @param {Object} payload - { groups: [...], type: string, config: Object }
  */
-function listTempGroups(type) {
+function exportGroupsToPDF(payload) {
   try {
-    var typePrefix = 'grOp';
-    if (type === 'needs') typePrefix = 'grBe';
-    else if (type === 'language') typePrefix = 'grLv';
+    if (!payload || !Array.isArray(payload.groups) || payload.groups.length === 0) {
+      return { success: false, error: 'Aucun groupe à exporter' };
+    }
 
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheets = ss.getSheets();
-    var tempSheets = [];
-    var regex = new RegExp('^' + typePrefix + '(\\d+)TEMP$');
+    const timestamp = new Date();
+    const timezone = Session.getScriptTimeZone();
+    const isoDate = Utilities.formatDate(timestamp, timezone, 'yyyy-MM-dd_HH-mm');
+    const fileName = `Groupes_${payload.type || 'besoins'}_${isoDate}.pdf`;
 
-    // Collecter tous les TEMP du type
-    for (var i = 0; i < sheets.length; i++) {
-      var shName = sheets[i].getName();
-      var match = shName.match(regex);
-      if (match) {
-        var num = parseInt(match[1], 10);
-        tempSheets.push({
-          name: shName,
-          number: num,
-          sheet: sheets[i]
+    const doc = DocumentApp.create(fileName.replace('.pdf', ''));
+    const body = doc.getBody();
+    body.clear();
+
+    body.appendParagraph('Répartition des groupes').setHeading(DocumentApp.ParagraphHeading.TITLE);
+    body.appendParagraph(`Généré le ${Utilities.formatDate(timestamp, timezone, 'dd/MM/yyyy à HH:mm')}`).setSpacingAfter(15);
+
+    if (payload.config) {
+      const metaRows = [];
+      metaRows.push(['Type de groupes', payload.config.groupTypeLabel || payload.type || '—']);
+
+      if (payload.config.selectedClasses && payload.config.selectedClasses.length) {
+        metaRows.push(['Classes concernées', payload.config.selectedClasses.join(', ')]);
+      }
+      if (payload.config.numGroups) {
+        metaRows.push(['Nombre de groupes', payload.config.numGroups]);
+      }
+      if (payload.config.subjectLabel) {
+        metaRows.push(['Discipline', payload.config.subjectLabel]);
+      }
+      if (payload.config.distributionLabel) {
+        metaRows.push(['Mode de répartition', payload.config.distributionLabel]);
+      }
+      if (payload.config.languageLabel) {
+        metaRows.push(['Langue', payload.config.languageLabel]);
+      }
+
+      if (metaRows.length > 0) {
+        const metaTable = body.appendTable(metaRows);
+        metaTable.setBorderWidth(0);
+        metaRows.forEach((_, rowIdx) => {
+          const cell = metaTable.getCell(rowIdx, 0);
+          cell.getChild(0).asParagraph().setBold(true);
         });
+        body.appendParagraph('').setSpacingAfter(15);
       }
     }
 
-    // Trier par numéro
-    tempSheets.sort(function(a, b) {
-      return a.number - b.number;
+    payload.groups.forEach((group, index) => {
+      const title = `Groupe ${index + 1} - ${group.name || 'Sans nom'} (${(group.students || []).length} élèves)`;
+      body.appendParagraph(title).setHeading(DocumentApp.ParagraphHeading.HEADING2);
+
+      const rows = [];
+      rows.push(['Nom', 'Prénom', 'Sexe', 'Classe', 'Score F', 'Score M', 'COM', 'TRA', 'PART', 'LV2', 'Option']);
+
+      (group.students || []).forEach(student => {
+        const scores = student.scores || {};
+        rows.push([
+          student.nom || '',
+          student.prenom || '',
+          (student.sexe || '').toString(),
+          student.classe || '',
+          String(scores.F ?? student.scoreF ?? ''),
+          String(scores.M ?? student.scoreM ?? ''),
+          String(scores.COM ?? student.com ?? ''),
+          String(scores.TRA ?? student.tra ?? ''),
+          String(scores.PART ?? student.part ?? ''),
+          student.lv2 || '',
+          student.opt || ''
+        ]);
+      });
+
+      const table = body.appendTable(rows);
+      const headerRow = table.getRow(0);
+      const headerCellCount = headerRow.getNumCells();
+      for (let cellIdx = 0; cellIdx < headerCellCount; cellIdx++) {
+        const cell = headerRow.getCell(cellIdx);
+        cell.setBackgroundColor('#e5e7eb');
+        cell.getChild(0).asParagraph().setBold(true);
+      }
+
+      body.appendParagraph('').setSpacingAfter(10);
     });
 
-    // Compter les élèves
-    var tempList = [];
-    var totalEleves = 0;
+    doc.saveAndClose();
 
-    for (var j = 0; j < tempSheets.length; j++) {
-      var data = tempSheets[j].sheet.getDataRange().getValues();
-      var eleveCount = data.length > 1 ? data.length - 1 : 0;
-      totalEleves += eleveCount;
+    const pdfBlob = doc.getAs('application/pdf').setName(fileName);
+    DriveApp.getFileById(doc.getId()).setTrashed(true);
 
-      tempList.push({
-        name: tempSheets[j].name,
-        number: tempSheets[j].number,
-        studentCount: eleveCount
-      });
-    }
+    const base64Data = Utilities.base64Encode(pdfBlob.getBytes());
 
     return {
       success: true,
-      type: type,
-      typePrefix: typePrefix,
-      tempGroups: tempList,
-      count: tempSheets.length,
-      totalStudents: totalEleves,
-      minNumber: tempSheets.length > 0 ? tempSheets[0].number : 0,
-      maxNumber: tempSheets.length > 0 ? tempSheets[tempSheets.length - 1].number : 0
+      fileName: fileName,
+      mimeType: 'application/pdf',
+      data: base64Data
     };
-
   } catch (e) {
-    console.error('Erreur listTempGroups:', e.toString());
+    console.error('❌ Erreur exportGroupsToPDF:', e.toString());
     return { success: false, error: e.toString() };
   }
 }
@@ -3118,17 +3648,19 @@ function loadTempGroups(type) {
     const sheets = ss.getSheets().filter(sh => sh.getName().startsWith(typePrefix) && sh.getName().endsWith('TEMP'));
 
     const groups = [];
+    const indexes = [];
 
     sheets.sort((a, b) => {
-      const numA = parseInt(a.getName().match(/\d+/)[0]);
-      const numB = parseInt(b.getName().match(/\d+/)[0]);
-      return numA - numB;
+      const idxA = extractGroupIndex_(a.getName(), typePrefix) || 0;
+      const idxB = extractGroupIndex_(b.getName(), typePrefix) || 0;
+      return idxA - idxB;
     });
 
     sheets.forEach((sh, idx) => {
       const data = sh.getDataRange().getValues();
       if (data.length < 2) return;
 
+      const groupIndex = extractGroupIndex_(sh.getName(), typePrefix) || (idx + 1);
       const header = data[0].map(h => String(h).toUpperCase().trim());
       const idCol = header.indexOf('ID_ELEVE') !== -1 ? header.indexOf('ID_ELEVE') :
                     header.indexOf('ID') !== -1 ? header.indexOf('ID') : 0;
@@ -3156,10 +3688,12 @@ function loadTempGroups(type) {
 
       if (students.length > 0) {
         groups.push({
-          name: 'Groupe ' + (idx + 1),
+          name: 'Groupe ' + groupIndex,
+          index: groupIndex,
           students: students,
           count: students.length
         });
+        indexes.push(groupIndex);
 
         console.log('   ✅ ' + sh.getName() + ': ' + students.length + ' élèves');
       }
@@ -3167,11 +3701,23 @@ function loadTempGroups(type) {
 
     console.log('✅ loadTempGroups - ' + groups.length + ' groupes chargés');
 
+    const metadata = loadContinuationMetadata_(typePrefix);
+    const offsetStart = indexes.length > 0 ? Math.min.apply(null, indexes) : 1;
+    const offsetEnd = indexes.length > 0 ? Math.max.apply(null, indexes) : offsetStart - 1;
+    const range = metadata?.lastTempRange || (indexes.length > 0 ? { start: offsetStart, end: offsetEnd } : null);
+
     return {
       success: true,
       groups: groups,
       totalGroups: groups.length,
-      type: type
+      type: type,
+      offsetStart,
+      offsetEnd,
+      persistMode: metadata?.lastPersistMode || 'replace',
+      createdRange: range,
+      lastTempUpdated: metadata?.lastTempUpdated || metadata?.lastUpdated || null,
+      lastFinalRange: metadata?.lastFinalRange || null,
+      lastFinalizedAt: metadata?.lastFinalUpdated || metadata?.lastUpdated || null
     };
   } catch (e) {
     console.error('❌ Erreur loadTempGroups:', e.toString());
@@ -3179,22 +3725,89 @@ function loadTempGroups(type) {
   }
 }
 
+function getContinuationStatus(request) {
+  try {
+    const type = typeof request === 'string' ? request : request?.type;
+    if (!type || !['needs', 'language', 'options'].includes(type)) {
+      return { success: false, error: 'Type invalide' };
+    }
+
+    let typePrefix = 'grOp';
+    if (type === 'needs') typePrefix = 'grBe';
+    else if (type === 'language') typePrefix = 'grLv';
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheets = ss.getSheets();
+
+    const tempSheets = sheets.filter(sh => sh.getName().startsWith(typePrefix) && sh.getName().endsWith('TEMP'));
+    const finalSheets = sheets.filter(sh => sh.getName().startsWith(typePrefix) && !sh.getName().endsWith('TEMP'));
+
+    const tempIndexes = tempSheets
+      .map(sh => extractGroupIndex_(sh.getName(), typePrefix))
+      .filter(idx => typeof idx === 'number');
+    const finalIndexes = finalSheets
+      .map(sh => extractGroupIndex_(sh.getName(), typePrefix))
+      .filter(idx => typeof idx === 'number');
+
+    const metadata = loadContinuationMetadata_(typePrefix) || {};
+
+    const lastTempIndex = metadata.lastTempIndex || (tempIndexes.length ? Math.max.apply(null, tempIndexes) : 0);
+    const lastFinalIndex = metadata.lastFinalIndex || (finalIndexes.length ? Math.max.apply(null, finalIndexes) : 0);
+    const lastTempRange = metadata.lastTempRange || (tempIndexes.length
+      ? { start: Math.min.apply(null, tempIndexes), end: Math.max.apply(null, tempIndexes) }
+      : null);
+    const lastFinalRange = metadata.lastFinalRange || (finalIndexes.length
+      ? { start: Math.min.apply(null, finalIndexes), end: Math.max.apply(null, finalIndexes) }
+      : null);
+
+    const nextOffsetCandidates = [];
+    if (lastTempIndex) nextOffsetCandidates.push(lastTempIndex + 1);
+    if (lastFinalIndex) nextOffsetCandidates.push(lastFinalIndex + 1);
+    if (tempIndexes.length) nextOffsetCandidates.push(Math.max.apply(null, tempIndexes) + 1);
+    if (finalIndexes.length) nextOffsetCandidates.push(Math.max.apply(null, finalIndexes) + 1);
+    const nextOffset = nextOffsetCandidates.length ? Math.max.apply(null, nextOffsetCandidates) : 1;
+
+    return {
+      success: true,
+      type,
+      prefix: typePrefix,
+      tempSheets: tempSheets.map(sh => ({
+        name: sh.getName(),
+        index: extractGroupIndex_(sh.getName(), typePrefix)
+      })),
+      finalSheets: finalSheets.map(sh => ({
+        name: sh.getName(),
+        index: extractGroupIndex_(sh.getName(), typePrefix)
+      })),
+      lastTempIndex,
+      lastFinalIndex,
+      lastTempRange,
+      lastFinalizedRange: lastFinalRange,
+      lastTempUpdated: metadata.lastTempUpdated || metadata.lastUpdated || null,
+      lastFinalizedAt: metadata.lastFinalUpdated || metadata.lastUpdated || null,
+      persistMode: metadata.lastPersistMode || 'replace',
+      nextOffset
+    };
+  } catch (error) {
+    console.error('❌ Erreur getContinuationStatus:', error);
+    return { success: false, error: error.toString() };
+  }
+}
+
 /**
  * Finalise les groupes temporaires en les renommant et les rendant visibles
  * Renomme grBe1TEMP → grBe1, supprime les TEMP
  */
-/**
- * Finalise les groupes temporaires en groupes visibles (TEMP → final)
- *
- * @param {string} type - 'needs', 'language', ou 'options'
- * @param {string} finalizeMode - 'replace' : supprime anciens | 'merge' : cumule avec existants
- *
- * MODE REPLACE: Supprime grBe1, grBe2, etc. puis renomme grBe1TEMP, grBe2TEMP (comportement actuel)
- * MODE MERGE: Détecte le plus grand numéro final, renomme grBe*TEMP en continuant la numérotation
- * Exemple: si grBe1, grBe2 existent, grBe1TEMP, grBe2TEMP, grBe3TEMP → grBe3, grBe4, grBe5
- */
-function finalizeTempGroups(type, finalizeMode, groupingId) {
+function finalizeTempGroups(request) {
   try {
+    let type = request;
+    let metadata = {};
+
+    if (typeof request === 'object' && request !== null) {
+      type = request.type;
+      metadata = request.config || request.metadata || {};
+    }
+
     if (!type || !['needs', 'language', 'options'].includes(type)) {
       return { success: false, error: 'Type invalide' };
     }
@@ -3203,8 +3816,10 @@ function finalizeTempGroups(type, finalizeMode, groupingId) {
     if (type === 'needs') typePrefix = 'grBe';
     else if (type === 'language') typePrefix = 'grLv';
 
-    // 🆕 SPRINT #6: Support finalisation sélective par groupingId
-    var shortGroupingId = groupingId ? getGroupingShortId(groupingId) : null;
+    const persistMode = request?.persistMode === 'continue' ? 'continue' : 'replace';
+    metadata = { ...metadata, persistMode };
+
+    console.log('✅ finalizeTempGroups pour type: ' + type + ' (prefix: ' + typePrefix + ') - mode ' + persistMode);
 
     finalizeMode = finalizeMode || 'replace';
     console.log('🆕 finalizeTempGroups [SPRINT #6 Multi-pass] - Mode: ' + finalizeMode + ' | Type: ' + type + ' | Prefix: ' + typePrefix + ' | GroupingId: ' + (groupingId || 'ALL'));
@@ -3349,370 +3964,128 @@ function finalizeTempGroups(type, finalizeMode, groupingId) {
 
     console.log('finalizeTempGroups terminé - Groupes rendus visibles');
 
-    // 🆕 SPRINT #6: Journalisation avec groupingId
-    var auditResult = logGroupOperation('FINALIZE', type, {
-      groupName: shortGroupingId ? (shortGroupingId + '_1-N') : (typePrefix + '1-N'),
-      count: tempSheets.length,
-      mode: finalizeMode,
-      status: 'SUCCESS',
-      details: {
-        groupingId: groupingId,
-        groupingIdShort: shortGroupingId,
-        finalizeMode: finalizeMode,
-        groupsCount: tempSheets.length
-      }
+    tempSheets.sort((a, b) => {
+      const idxA = extractGroupIndex_(a.getName(), typePrefix) || 0;
+      const idxB = extractGroupIndex_(b.getName(), typePrefix) || 0;
+      return idxA - idxB;
     });
 
-    return {
-      success: true,
-      message: 'Groupes finalisés (' + finalizeMode + ' mode)',
+    const renamedIndexes = [];
+
+    const snapshotGroups = tempSheets.map(sh => {
+      const tempName = sh.getName();
+      const finalName = tempName.replace('TEMP', '');
+      const values = sh.getDataRange().getValues();
+      if (!values || values.length < 2) {
+        return { name: finalName, students: [] };
+      }
+
+      const header = values[0];
+      const students = values.slice(1)
+        .filter(row => row.some(cell => cell !== '' && cell !== null))
+        .map(row => normalizeSnapshotStudent_(header, row));
+
+      return { name: finalName, students: students };
+    });
+
+    const snapshotResult = createGroupSnapshot({
       type: type,
       prefix: typePrefix,
-      groupingId: groupingId,
-      groupingIdShort: shortGroupingId,
-      finalizeMode: finalizeMode,
-      count: tempSheets.length,
-      auditLogged: auditResult.success
-    };
-  } catch (e) {
-    console.error('Erreur finalizeTempGroups:', e.toString());
-    logGroupOperation('FINALIZE', type, {
-      groupName: typePrefix,
-      status: 'FAILED',
-      details: { error: e.toString() }
+      groups: snapshotGroups,
+      metadata: metadata,
+      source: 'finalizeTempGroups'
     });
     return { success: false, error: e.toString() };
   }
 }
 
-// ═══════════════════════════════════════════════════════════════
-//  SPRINT #1 : PERSISTANCE MULTI-VAGUES (PropertiesService)
-// ═══════════════════════════════════════════════════════════════
+    if (persistMode === 'replace') {
+      const finalSheets = sheets.filter(sh => {
+        const name = sh.getName();
+        return name.startsWith(typePrefix) && !name.endsWith('TEMP');
+      });
 
-/**
- * Sauvegarde les métadonnées de continuation en PropertiesService
- * Permet de reprendre une série multi-vagues après rechargement navigateur
- *
- * metadata = {
- *   lastTempRange: {min: 1, max: 3, count: 3, typePrefix: 'grBe'},
- *   tempOffsetStart: 4,
- *   persistMode: true,
- *   timestamp: '2025-10-29T14:30:00Z',
- *   user: 'teacher@school.fr'
- * }
- */
-function saveContinuationMetadata(type, metadata) {
-  try {
-    if (!type || !metadata) {
-      return { success: false, error: 'Type ou metadata manquants' };
+      finalSheets.forEach(sh => {
+        console.log('   🗑️ Suppression de l\'ancien:', sh.getName());
+        ss.deleteSheet(sh);
+      });
     }
 
-    const props = PropertiesService.getDocumentProperties();
-    const key = 'CONTINUATION_' + type;
+    // Renommer les TEMP en final + afficher
+    tempSheets.forEach(sh => {
+      const tempName = sh.getName();
+      const finalName = tempName.replace('TEMP', ''); // grBe1TEMP → grBe1
+      const index = extractGroupIndex_(tempName, typePrefix);
 
-    // Enrichir metadata avec timestamp et user
-    const enriched = {
-      ...metadata,
-      timestamp: new Date().toISOString(),
-      user: Session.getActiveUser().getEmail()
-    };
+      if (persistMode === 'continue') {
+        const existing = ss.getSheetByName(finalName);
+        if (existing) {
+          console.log('   ♻️ Remplacement du groupe existant: ' + finalName);
+          ss.deleteSheet(existing);
+        }
+      }
 
-    // Sauvegarder
-    props.setProperty(key, JSON.stringify(enriched));
+      console.log('   📝 Renommage: ' + tempName + ' → ' + finalName);
+      sh.setName(finalName);
+      sh.showSheet();
+      if (typeof index === 'number') {
+        renamedIndexes.push(index);
+      }
+    });
 
     console.log('✅ Continuation metadata sauvegardée pour ' + type);
     console.log('   Data: ' + JSON.stringify(enriched).substring(0, 100) + '...');
+
+    const continuation = loadContinuationMetadata_(typePrefix);
+    const finalRange = renamedIndexes.length > 0
+      ? { start: Math.min.apply(null, renamedIndexes), end: Math.max.apply(null, renamedIndexes) }
+      : continuation?.lastFinalRange || null;
+
+    const finalizedAt = new Date().toISOString();
+
+    const updatedMetadata = {
+      ...continuation,
+      lastFinalIndex: renamedIndexes.length > 0 ? Math.max.apply(null, renamedIndexes) : (continuation?.lastFinalIndex || 0),
+      lastFinalRange: finalRange,
+      lastPersistMode: persistMode,
+      lastUpdated: finalizedAt,
+      lastFinalUpdated: finalizedAt,
+      lastPassId: request?.passId || continuation?.lastPassId || '',
+      lastPassName: request?.passName || continuation?.lastPassName || ''
+    };
+
+    saveContinuationMetadata_(typePrefix, updatedMetadata);
+
+    logGroupOperation({
+      operation: 'FINALIZE_TEMP_GROUPS',
+      type: type,
+      prefix: typePrefix,
+      groupCount: tempSheets.length,
+      status: 'SUCCESS',
+      message: 'Finalisation des groupes',
+      metadata: { ...metadata, snapshotId: snapshotResult?.snapshotId },
+      snapshotId: snapshotResult?.snapshotId || ''
+    });
 
     return {
       success: true,
       message: 'Continuation metadata sauvegardée pour ' + type,
       type: type,
-      metadata: enriched
+      prefix: typePrefix,
+      count: tempSheets.length,
+      snapshotId: snapshotResult?.snapshotId || null,
+      lastFinalRange: finalRange,
+      persistMode,
+      finalizedAt
     };
   } catch (e) {
-    console.error('❌ Erreur saveContinuationMetadata:', e.toString());
-    return { success: false, error: e.toString() };
-  }
-}
-
-/**
- * Charge les métadonnées de continuation depuis PropertiesService
- * Retourne null si aucune métadonnée n'existe
- */
-function loadContinuationMetadata(type) {
-  try {
-    if (!type) {
-      return { success: false, error: 'Type manquant', metadata: null };
-    }
-
-    const props = PropertiesService.getDocumentProperties();
-    const key = 'CONTINUATION_' + type;
-    const json = props.getProperty(key);
-
-    if (!json) {
-      console.log('ℹ️  Pas de continuation metadata pour ' + type);
-      return { success: true, metadata: null };
-    }
-
-    const metadata = JSON.parse(json);
-    console.log('✅ Continuation metadata chargée pour ' + type);
-    console.log('   Offset start: ' + metadata.tempOffsetStart);
-    console.log('   Last range: ' + metadata.lastTempRange.min + '-' + metadata.lastTempRange.max);
-
-    return {
-      success: true,
-      metadata: metadata,
-      type: type
-    };
-  } catch (e) {
-    console.error('❌ Erreur loadContinuationMetadata:', e.toString());
-    return { success: false, error: e.toString(), metadata: null };
-  }
-}
-
-/**
- * Supprime les métadonnées de continuation pour un type donné
- * Appelée lors du "Recommencer une nouvelle série"
- */
-function clearContinuationMetadata(type) {
-  try {
-    if (!type) {
-      return { success: false, error: 'Type manquant' };
-    }
-
-    const props = PropertiesService.getDocumentProperties();
-    const key = 'CONTINUATION_' + type;
-    props.deleteProperty(key);
-
-    console.log('🗑️  Continuation metadata supprimée pour ' + type);
-
-    return {
-      success: true,
-      message: 'Continuation metadata supprimée pour ' + type,
-      type: type
-    };
-  } catch (e) {
-    console.error('❌ Erreur clearContinuationMetadata:', e.toString());
-    return { success: false, error: e.toString() };
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-//  SPRINT #4 : VERSIONING ET SNAPSHOTS
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Crée un snapshot d'un groupe finalisé avant modification
- * Garde seulement les 5 dernières versions par groupe
- *
- * Exemple : grBe1 → grBe1_snapshot_2025-10-29_v1, grBe1_snapshot_2025-10-29_v2, etc.
- */
-function createGroupSnapshot(groupName) {
-  try {
-    if (!groupName) {
-      return { success: false, error: 'groupName manquant' };
-    }
-
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const original = ss.getSheetByName(groupName);
-
-    if (!original) {
-      console.warn(`⚠️  Groupe "${groupName}" non trouvé, pas de snapshot créé`);
-      return { success: false, error: `Groupe "${groupName}" non trouvé` };
-    }
-
-    // Créer copie
-    const timestamp = new Date().toISOString().slice(0, 10); // 2025-10-29
-    const copy = original.copyTo(ss);
-    const snapshotName = groupName + '_snapshot_' + timestamp;
-    copy.setName(snapshotName);
-    copy.hideSheet();
-
-    console.log(`✅ Snapshot créé: ${snapshotName}`);
-
-    // Nettoyer les anciens snapshots (garder seulement 5 derniers)
-    const allSheets = ss.getSheets();
-    const snapshots = allSheets
-      .filter(sh => sh.getName().startsWith(groupName + '_snapshot_'))
-      .map(sh => ({
-        sheet: sh,
-        name: sh.getName()
-      }))
-      .sort((a, b) => b.name.localeCompare(a.name)); // Plus récents d'abord
-
-    console.log(`🔍 Snapshots existants pour ${groupName}: ${snapshots.length}`);
-
-    // Supprimer les plus vieux si > 5
-    if (snapshots.length > 5) {
-      const toDelete = snapshots.slice(5);
-      toDelete.forEach(item => {
-        console.log(`🗑️  Suppression du snapshot ancien: ${item.name}`);
-        ss.deleteSheet(item.sheet);
-      });
-    }
-
-    // 🆕 SPRINT #5: Journaliser la création du snapshot
-    logGroupOperation('CREATE_SNAPSHOT', 'snapshot', {
-      groupName: groupName,
-      snapshotCreated: snapshotName,
-      status: 'SUCCESS',
-      details: {
-        snapshotName: snapshotName,
-        timestamp: timestamp
-      }
+    console.error('❌ Erreur finalizeTempGroups:', e.toString());
+    logGroupOperation({
+      operation: 'FINALIZE_TEMP_GROUPS',
+      type: typeof request === 'string' ? request : request?.type,
+      status: 'ERROR',
+      message: e.toString()
     });
-
-    return {
-      success: true,
-      message: `Snapshot créé pour ${groupName}`,
-      snapshotName: snapshotName,
-      timestamp: timestamp,
-      snapshotsCount: Math.min(snapshots.length + 1, 5)
-    };
-  } catch (e) {
-    console.error('❌ Erreur createGroupSnapshot:', e.toString());
-    logGroupOperation('CREATE_SNAPSHOT', 'snapshot', {
-      groupName: groupName,
-      status: 'FAILED',
-      details: { error: e.toString() }
-    });
-    return { success: false, error: e.toString() };
-  }
-}
-
-/**
- * Liste tous les snapshots disponibles pour un groupe
- * Retourne les 5 derniers snapshots (du plus récent au plus ancien)
- */
-function listGroupSnapshots(groupName) {
-  try {
-    if (!groupName) {
-      return { success: false, error: 'groupName manquant', snapshots: [] };
-    }
-
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const allSheets = ss.getSheets();
-
-    const snapshots = allSheets
-      .filter(sh => sh.getName().startsWith(groupName + '_snapshot_'))
-      .map(sh => ({
-        name: sh.getName(),
-        timestamp: sh.getName().match(/_snapshot_(\d{4}-\d{2}-\d{2})/)?.[1] || 'unknown'
-      }))
-      .sort((a, b) => b.name.localeCompare(a.name)) // Plus récents d'abord
-      .slice(0, 5); // Seulement 5 derniers
-
-    console.log(`📸 Snapshots pour ${groupName}: ${snapshots.length}`);
-    snapshots.forEach(s => console.log(`   - ${s.name}`));
-
-    return {
-      success: true,
-      groupName: groupName,
-      snapshots: snapshots,
-      count: snapshots.length
-    };
-  } catch (e) {
-    console.error('❌ Erreur listGroupSnapshots:', e.toString());
-    return { success: false, error: e.toString(), snapshots: [] };
-  }
-}
-
-/**
- * Restaure un groupe à partir d'un snapshot
- * Remplace le contenu du groupe par celui du snapshot
- */
-function restoreFromSnapshot(snapshotName) {
-  try {
-    if (!snapshotName) {
-      return { success: false, error: 'snapshotName manquant' };
-    }
-
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const snapshot = ss.getSheetByName(snapshotName);
-
-    if (!snapshot) {
-      return { success: false, error: `Snapshot "${snapshotName}" non trouvé` };
-    }
-
-    // Extraire le nom du groupe original du snapshot
-    // Ex: grBe1_snapshot_2025-10-29 → grBe1
-    const match = snapshotName.match(/^(.+?)_snapshot_/);
-    const originalGroupName = match ? match[1] : null;
-
-    if (!originalGroupName) {
-      return { success: false, error: `Impossible d'extraire le nom du groupe de "${snapshotName}"` };
-    }
-
-    // Copier le snapshot par-dessus l'original
-    const original = ss.getSheetByName(originalGroupName);
-
-    if (original) {
-      console.log(`🗑️  Suppression de l'ancien groupe: ${originalGroupName}`);
-      ss.deleteSheet(original);
-    }
-
-    // Copier snapshot avec nouveau nom (original)
-    const restoredCopy = snapshot.copyTo(ss);
-    restoredCopy.setName(originalGroupName);
-    restoredCopy.showSheet();
-
-    console.log(`✅ Groupe restauré depuis ${snapshotName} → ${originalGroupName}`);
-
-    // 🆕 SPRINT #5: Journaliser la restauration du snapshot
-    logGroupOperation('RESTORE', 'snapshot', {
-      groupName: originalGroupName,
-      snapshotCreated: snapshotName,
-      status: 'SUCCESS',
-      details: {
-        snapshotName: snapshotName,
-        restoredGroup: originalGroupName
-      }
-    });
-
-    return {
-      success: true,
-      message: `Groupe "${originalGroupName}" restauré depuis ${snapshotName}`,
-      originalGroupName: originalGroupName,
-      snapshotName: snapshotName,
-      timestamp: new Date().toISOString()
-    };
-  } catch (e) {
-    console.error('❌ Erreur restoreFromSnapshot:', e.toString());
-    logGroupOperation('RESTORE', 'snapshot', {
-      groupName: snapshotName,
-      status: 'FAILED',
-      details: { error: e.toString() }
-    });
-    return { success: false, error: e.toString() };
-  }
-}
-
-/**
- * Supprime un snapshot spécifique
- */
-function deleteSnapshot(snapshotName) {
-  try {
-    if (!snapshotName) {
-      return { success: false, error: 'snapshotName manquant' };
-    }
-
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const snapshot = ss.getSheetByName(snapshotName);
-
-    if (!snapshot) {
-      return { success: false, error: `Snapshot "${snapshotName}" non trouvé` };
-    }
-
-    ss.deleteSheet(snapshot);
-    console.log(`🗑️  Snapshot supprimé: ${snapshotName}`);
-
-    return {
-      success: true,
-      message: `Snapshot "${snapshotName}" supprimé`,
-      snapshotName: snapshotName
-    };
-  } catch (e) {
-    console.error('❌ Erreur deleteSnapshot:', e.toString());
     return { success: false, error: e.toString() };
   }
 }

@@ -89,6 +89,21 @@
     availableClasses: [],               // Classes visibles dans le board
     numGroups: 3,                       // Nombre de groupes à créer
 
+    // Workflow multi-passes
+    passes: [],                         // Regroupements définis par l'utilisateur
+    activePassId: null,                 // Pass actuellement configuré/affiché
+    passSequence: 1,                    // Compteur pour nommer les regroupements
+    persistMode: 'continue',            // 'replace' | 'continue'
+    tempOffsetStart: 1,                 // Index de départ pour la numérotation
+    lastTempRange: { start: null, end: null }, // Dernière plage TEMP créée
+    lastTempSavedAt: null,
+    lastFinalRange: { start: null, end: null },
+    lastFinalizedAt: null,
+    continuationStatus: null,           // Métadonnées renvoyées par Apps Script
+    isLoadingContinuation: false,
+    continuationStatusError: null,
+    newPassLabel: '',
+
     // Config spécifique Besoins
     selectedSubject: 'both',            // 'both' | 'maths' | 'french'
     distributionType: 'heterogeneous',  // 'heterogeneous' | 'homogeneous'
@@ -118,40 +133,11 @@
     // Statistiques
     showStatistics: true,
 
-    // 🆕 Mode de sauvegarde (pour workflow multi-phase)
-    saveMode: 'append',                 // 'replace' | 'append' (défaut append pour workflow multi-phase)
-
-    // 🆕 Persistance multi-vagues
-    tempOffsetStart: 1,                 // Numéro de départ pour les groupes TEMP (grBe1, grBe2, etc.)
-    lastTempRange: null,                // Mémorize: { min: 1, max: 3, count: 3 } après chaque sauvegarde
-    persistMode: false,                 // Si true, ne pas réinitialiser les groupes au reset
-
-    // 🆕 SPRINT #1 : Persistance
-    continuationLoaded: false,           // Drapeau pour ne charger continuation qu'une fois
-
-    // ═══════════════════════════════════════════════════════════════
-    // 🆕 GROUPINGS MODEL (Multi-pass support) - SPRINT #6
-    // ═══════════════════════════════════════════════════════════════
-
-    // Groupings registry: Array of {id, label, classes, groupCount, active, description}
-    groupings: [],
-
-    // Currently active grouping being edited/displayed
-    activeGroupingId: null,
-
-    // Per-grouping configuration (overrides global config)
-    // Format: { groupingId: { lv2Filter, distribution, offsetStart, ... } }
-    groupingConfig: {},
-
-    // Per-grouping generated groups (stores results per grouping)
-    // Format: { groupingId: [...groups] }
-    groupingGroups: {},
-
-    // Track if grouping mode is active
-    useGroupings: false,  // true if user has created multiple groupings, false for backward compat
-
-    // Grouping metadata from backend (for continuation mode)
-    groupingMetadata: {}  // { groupingId: { label, classes, groupCount, offsetStart, offsetEnd, status } }
+    // Snapshots
+    snapshots: [],
+    snapshotLoading: false,
+    snapshotLoaded: false,
+    snapshotError: null
   };
 
   // ═══════════════════════════════════════════════════════════════
@@ -200,6 +186,30 @@
     }
   }
 
+  function downloadBase64File(base64Data, fileName, mimeType) {
+    try {
+      const byteCharacters = atob(base64Data);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      const blob = new Blob([byteArray], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const link = documentRef.createElement('a');
+      link.href = url;
+      link.download = fileName;
+      documentRef.body.appendChild(link);
+      link.click();
+      documentRef.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      return true;
+    } catch (error) {
+      console.error('❌ Erreur downloadBase64File:', error);
+      return false;
+    }
+  }
+
   function formatDate(date) {
     return new Date(date).toLocaleString('fr-FR', {
       day: '2-digit',
@@ -208,6 +218,238 @@
       hour: '2-digit',
       minute: '2-digit'
     });
+  }
+
+  function generatePassId() {
+    return `pass_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+  }
+
+  function cloneStudent(student) {
+    if (!student || typeof student !== 'object') return student;
+    try {
+      return JSON.parse(JSON.stringify(student));
+    } catch (error) {
+      const clone = {};
+      Object.keys(student).forEach(key => {
+        const value = student[key];
+        clone[key] = (value && typeof value === 'object') ? cloneStudent(value) : value;
+      });
+      return clone;
+    }
+  }
+
+  function cloneGroupsData(groups) {
+    return (groups || []).map(group => ({
+      ...(group || {}),
+      students: (group?.students || []).map(cloneStudent)
+    }));
+  }
+
+  function applyOffsetToGroups(groups, offsetStart) {
+    const start = Number.isFinite(offsetStart) && offsetStart > 0 ? offsetStart : 1;
+    const defaultNamePattern = /^groupe\s+\d+(.*)$/i;
+
+    return (groups || []).map((group, index) => {
+      const newIndex = start + index;
+      const updated = {
+        ...(group || {}),
+        index: newIndex,
+        students: (group?.students || []).map(cloneStudent)
+      };
+
+      if (!group?.name || defaultNamePattern.test(group.name.trim())) {
+        const suffix = group?.name && defaultNamePattern.test(group.name.trim())
+          ? group.name.trim().replace(defaultNamePattern, '$1').trim()
+          : '';
+        updated.name = `Groupe ${newIndex}${suffix ? ` ${suffix}` : ''}`.trim();
+      }
+
+      return updated;
+    });
+  }
+
+  function getActivePass() {
+    if (!state.activePassId) return null;
+    return state.passes.find(pass => pass.id === state.activePassId) || null;
+  }
+
+  function syncStateFromPass(pass) {
+    if (!pass) return;
+
+    state.selectedClasses = Array.isArray(pass.classes) ? [...pass.classes] : [];
+    state.numGroups = typeof pass.numGroups === 'number' ? pass.numGroups : state.numGroups;
+    state.persistMode = pass.persistMode || 'continue';
+    state.tempOffsetStart = typeof pass.offsetStart === 'number' && pass.offsetStart > 0
+      ? pass.offsetStart
+      : Math.max(1, getSuggestedOffset());
+    state.generatedGroups = applyOffsetToGroups(pass.generatedGroups || [], state.tempOffsetStart);
+    state.lastTempRange = pass.lastTempRange || { start: null, end: null };
+    state.lastFinalRange = pass.lastFinalRange || { start: null, end: null };
+    state.lastTempSavedAt = pass.lastSavedAt || null;
+    state.lastFinalizedAt = pass.lastFinalizedAt || null;
+    state.lastGeneration = pass.lastGeneration || null;
+  }
+
+  function syncActivePassFromState() {
+    const activePass = getActivePass();
+    if (!activePass) return;
+
+    activePass.classes = [...state.selectedClasses];
+    activePass.numGroups = state.numGroups;
+    activePass.persistMode = state.persistMode;
+    activePass.offsetStart = state.tempOffsetStart;
+    activePass.generatedGroups = cloneGroupsData(state.generatedGroups);
+    activePass.lastTempRange = state.lastTempRange ? { ...state.lastTempRange } : { start: null, end: null };
+    activePass.lastFinalRange = state.lastFinalRange ? { ...state.lastFinalRange } : { start: null, end: null };
+    activePass.lastSavedAt = state.lastTempSavedAt || null;
+    activePass.lastFinalizedAt = state.lastFinalizedAt || null;
+    activePass.lastGeneration = state.lastGeneration;
+    activePass.updatedAt = new Date().toISOString();
+  }
+
+  function getSuggestedOffset() {
+    if (state.continuationStatus?.nextOffset) {
+      return state.continuationStatus.nextOffset;
+    }
+
+    const maxFromPasses = state.passes.reduce((max, pass) => {
+      const candidates = [
+        pass?.lastTempRange?.end || 0,
+        pass?.lastFinalRange?.end || 0,
+        ...(pass?.generatedGroups || []).map(g => g?.index || 0)
+      ];
+      const localMax = Math.max(...candidates, 0);
+      return Math.max(max, localMax);
+    }, 0);
+
+    return maxFromPasses > 0 ? maxFromPasses + 1 : 1;
+  }
+
+  function getCurrentOffsetEnd() {
+    if (!Array.isArray(state.generatedGroups) || state.generatedGroups.length === 0) {
+      return null;
+    }
+    return state.tempOffsetStart + state.generatedGroups.length - 1;
+  }
+
+  function setActivePass(passId) {
+    if (!passId) {
+      state.activePassId = null;
+      return;
+    }
+
+    const target = state.passes.find(pass => pass.id === passId);
+    if (!target) {
+      console.warn('[GroupsModule] Impossible de sélectionner le regroupement', passId);
+      return;
+    }
+
+    state.activePassId = passId;
+    state.newPassLabel = '';
+    syncStateFromPass(target);
+  }
+
+  function createPassFromSelection() {
+    const classes = [...state.selectedClasses];
+    if (classes.length === 0) {
+      showToast('Sélectionnez au moins une classe pour créer un regroupement', 'warning');
+      return null;
+    }
+
+    const label = (state.newPassLabel || '').trim() || `Regroupement ${state.passSequence}`;
+    state.passSequence += 1;
+
+    const offsetStart = state.tempOffsetStart || getSuggestedOffset();
+
+    const pass = {
+      id: generatePassId(),
+      name: label,
+      classes,
+      numGroups: state.numGroups,
+      persistMode: state.persistMode,
+      offsetStart,
+      generatedGroups: applyOffsetToGroups(state.generatedGroups || [], offsetStart),
+      lastTempRange: state.lastTempRange ? { ...state.lastTempRange } : { start: null, end: null },
+      lastFinalRange: state.lastFinalRange ? { ...state.lastFinalRange } : { start: null, end: null },
+      lastSavedAt: state.lastTempSavedAt || null,
+      lastFinalizedAt: state.lastFinalizedAt || null,
+      createdAt: new Date().toISOString(),
+      updatedAt: null,
+      lastCreatedTempSheets: []
+    };
+
+    state.passes.push(pass);
+    state.tempOffsetStart = offsetStart;
+    setActivePass(pass.id);
+    state.newPassLabel = '';
+    return pass;
+  }
+
+  function removePass(passId) {
+    const index = state.passes.findIndex(pass => pass.id === passId);
+    if (index === -1) return;
+
+    const [removed] = state.passes.splice(index, 1);
+    if (removed && removed.id === state.activePassId) {
+      state.activePassId = state.passes.length ? state.passes[0].id : null;
+      if (state.activePassId) {
+        syncStateFromPass(getActivePass());
+      } else {
+        state.selectedClasses = [];
+        state.generatedGroups = [];
+        state.numGroups = 3;
+        state.persistMode = 'continue';
+        state.tempOffsetStart = getSuggestedOffset();
+        state.lastTempRange = { start: null, end: null };
+        state.lastTempSavedAt = null;
+        state.lastFinalRange = { start: null, end: null };
+        state.lastFinalizedAt = null;
+        state.lastGeneration = null;
+      }
+    }
+  }
+
+  function getPassCountForClass(classe) {
+    return state.passes.reduce((count, pass) => {
+      return count + (pass?.classes?.includes(classe) ? 1 : 0);
+    }, 0);
+  }
+
+  function sanitizeStudentForTransfer(student = {}) {
+    const scores = student.scores || {};
+    const normalizedScores = {
+      F: scores.F ?? student.scoreF ?? '',
+      M: scores.M ?? student.scoreM ?? '',
+      COM: scores.COM ?? student.com ?? '',
+      TRA: scores.TRA ?? student.tra ?? '',
+      PART: scores.PART ?? student.part ?? '',
+      ABS: scores.ABS ?? student.abs ?? ''
+    };
+
+    return {
+      id: student.id || '',
+      nom: student.nom || '',
+      prenom: student.prenom || '',
+      sexe: student.sexe || '',
+      classe: student.classe || '',
+      lv2: student.lv2 || '',
+      opt: student.opt || '',
+      source: student.source || '',
+      scores: normalizedScores,
+      com: normalizedScores.COM,
+      tra: normalizedScores.TRA,
+      part: normalizedScores.PART,
+      abs: normalizedScores.ABS
+    };
+  }
+
+  function normalizeStudentStructure(student = {}) {
+    const sanitized = sanitizeStudentForTransfer(student);
+    return {
+      ...student,
+      ...sanitized,
+      scores: { ...sanitized.scores }
+    };
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -814,7 +1056,130 @@
   //  ÉTAPE 2 : Définition des Regroupements (SPRINT #6)
   // ─────────────────────────────────────────────────────────────
 
-  function renderStep2_Groupings() {
+  function renderContinuationBanner() {
+    if (state.isLoadingContinuation) {
+      return `
+        <div class="bg-slate-100 border border-slate-200 rounded-xl px-5 py-4 flex items-center gap-3">
+          <div class="spinner-small"></div>
+          <div>
+            <p class="text-sm font-semibold text-slate-700">Analyse des séries existantes...</p>
+            <p class="text-xs text-slate-500">Lecture des groupes déjà finalisés pour déterminer l'offset recommandé.</p>
+          </div>
+        </div>
+      `;
+    }
+
+    if (state.continuationStatusError) {
+      return `
+        <div class="bg-red-50 border border-red-200 rounded-xl px-5 py-4 flex items-start gap-3">
+          <i class="fas fa-circle-exclamation text-red-500 mt-1"></i>
+          <div>
+            <p class="text-sm font-semibold text-red-700">Impossible de lire l'état des groupes existants</p>
+            <p class="text-xs text-red-600">${state.continuationStatusError}</p>
+          </div>
+        </div>
+      `;
+    }
+
+    if (!state.continuationStatus) {
+      return '';
+    }
+
+    const status = state.continuationStatus;
+    const nextOffset = status.nextOffset || 1;
+    const lastFinal = status.lastFinalIndex ? `${status.prefix}${status.lastFinalIndex}` : 'Aucun groupe finalisé';
+    const tempCount = Array.isArray(status.tempSheets) ? status.tempSheets.length : 0;
+    const rangeStart = status.lastFinalizedRange?.start ? `${status.prefix}${status.lastFinalizedRange.start}` : null;
+    const rangeEnd = status.lastFinalizedRange?.end ? `${status.prefix}${status.lastFinalizedRange.end}` : null;
+    const finalizedAt = status.lastFinalizedAt ? formatDate(status.lastFinalizedAt) : null;
+
+    return `
+      <div class="bg-blue-50 border border-blue-200 rounded-2xl px-6 py-5 flex flex-col gap-2">
+        <div class="flex items-center justify-between gap-3">
+          <div class="flex items-center gap-3">
+            <i class="fas fa-route text-blue-600 text-xl"></i>
+            <div>
+              <p class="text-sm font-semibold text-blue-900">Mode ${state.groupType === 'needs' ? 'Groupes de besoins' : state.groupType === 'language' ? 'Groupes LV2' : 'Groupes options'}</p>
+              <p class="text-xs text-blue-700">Dernier groupe finalisé : <strong>${lastFinal}</strong> • Offset recommandé : <strong>${nextOffset}</strong></p>
+            </div>
+          </div>
+          ${tempCount > 0 ? `<span class="px-3 py-1 rounded-full bg-white border border-blue-200 text-xs text-blue-700 font-semibold">${tempCount} groupe(s) TEMP détecté(s)</span>` : ''}
+        </div>
+        ${(rangeStart || rangeEnd) ? `
+          <p class="text-xs text-blue-700">
+            Série finalisée la plus récente : ${rangeStart || '?'} → ${rangeEnd || '?'}${finalizedAt ? ` (${finalizedAt})` : ''}
+          </p>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  function renderPassCard(pass, index) {
+    const isActive = pass.id === state.activePassId;
+    const nextEnd = pass.offsetStart && pass.numGroups ? pass.offsetStart + pass.numGroups - 1 : null;
+    const persistLabel = pass.persistMode === 'continue' ? 'Continuation' : 'Remplacement';
+    const persistIcon = pass.persistMode === 'continue' ? 'fa-layer-group' : 'fa-eraser';
+    const updated = pass.updatedAt || pass.createdAt;
+    const nextRangeLabel = pass.offsetStart ? `${pass.offsetStart}${nextEnd ? ` → ${nextEnd}` : ''}` : '—';
+    const lastTempRangeLabel = pass.lastTempRange?.start && pass.lastTempRange?.end
+      ? `${pass.lastTempRange.start} → ${pass.lastTempRange.end}`
+      : 'Aucune';
+    const lastTempSavedAt = pass.lastSavedAt ? formatDate(pass.lastSavedAt) : null;
+    const lastFinalRangeLabel = pass.lastFinalRange?.start && pass.lastFinalRange?.end
+      ? `${pass.lastFinalRange.start} → ${pass.lastFinalRange.end}`
+      : 'Aucune';
+    const lastFinalizedAt = pass.lastFinalizedAt ? formatDate(pass.lastFinalizedAt) : null;
+
+    return `
+      <div class="pass-card ${isActive ? 'active' : ''}" data-pass-id="${pass.id}">
+        <div class="pass-card__header">
+          <div class="flex items-center gap-3">
+            <span class="pass-badge">#${index + 1}</span>
+            <div>
+              <h4 class="pass-title">${pass.name}</h4>
+              <p class="pass-meta">${pass.classes.length} classe(s) • ${pass.numGroups} groupe(s) • MAJ ${updated ? formatDate(updated) : '—'}</p>
+            </div>
+          </div>
+          <div class="flex items-center gap-2 text-xs font-semibold text-blue-700">
+            <i class="fas ${persistIcon}"></i>
+            <span>${persistLabel}</span>
+          </div>
+        </div>
+        <div class="pass-card__body">
+          <div class="flex flex-wrap gap-2 mb-3">
+            ${pass.classes.map(cl => `<span class="pass-chip">${cl}</span>`).join('')}
+          </div>
+          <div class="pass-summary">
+            <div>
+              <p class="summary-label">Prochaine série</p>
+              <p class="summary-value">${nextRangeLabel}</p>
+              <span class="summary-hint">${pass.persistMode === 'continue' ? 'Ajout à la suite' : 'Remplacement complet'}</span>
+            </div>
+            <div>
+              <p class="summary-label">Sauvegarde TEMP</p>
+              <p class="summary-value">${lastTempRangeLabel}</p>
+              <span class="summary-hint">${lastTempSavedAt || 'Jamais'}</span>
+            </div>
+            <div>
+              <p class="summary-label">Finalisation</p>
+              <p class="summary-value">${lastFinalRangeLabel}</p>
+              <span class="summary-hint">${lastFinalizedAt || 'Jamais'}</span>
+            </div>
+          </div>
+        </div>
+        <div class="pass-card__footer">
+          <button type="button" class="pass-action ${isActive ? 'primary' : ''}" data-action="set-active-pass" data-pass-id="${pass.id}">
+            <i class="fas fa-compass"></i>Configurer
+          </button>
+          <button type="button" class="pass-action danger" data-action="delete-pass" data-pass-id="${pass.id}">
+            <i class="fas fa-trash"></i>Supprimer
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderStep2_SelectClasses() {
     if (state.isLoading) {
       return `
         <div class="flex flex-col items-center justify-center py-20">
@@ -838,179 +1203,103 @@
       `;
     }
 
+    const classCards = state.availableClasses.length === 0
+      ? `
+        <div class="col-span-full text-center py-8 text-slate-500">
+          <i class="fas fa-inbox text-4xl mb-3"></i>
+          <p>Aucune classe avec suffixe FIN trouvée</p>
+          <p class="text-sm mt-2">Vérifiez que vos onglets sont nommés correctement (ex: 6°1FIN)</p>
+        </div>
+      `
+      : state.availableClasses.map(classe => {
+          const isSelected = state.selectedClasses.includes(classe);
+          const assignedCount = getPassCountForClass(classe);
+          const badge = assignedCount > 0 ? `<span class="class-assignment">${assignedCount} regroupement(s)</span>` : '';
+          return `
+            <label class="class-checkbox-card ${isSelected ? 'selected' : ''}">
+              <input
+                type="checkbox"
+                class="class-checkbox"
+                value="${classe}"
+                ${isSelected ? 'checked' : ''}
+              >
+              <span class="class-name">${classe}</span>
+              ${badge}
+              <i class="fas fa-check check-icon"></i>
+            </label>
+          `;
+        }).join('');
+
     return `
-      <div class="max-w-4xl mx-auto">
-        <div class="text-center mb-8">
-          <h3 class="text-2xl font-bold text-slate-900 mb-3">Définissez vos Regroupements</h3>
-          <p class="text-slate-600">Composez les passes de groupes que vous souhaitez créer</p>
-        </div>
+      <div class="space-y-6 max-w-6xl mx-auto">
+        ${renderContinuationBanner()}
 
-        <!-- Bouton Ajouter Regroupement -->
-        <div class="mb-6">
-          <button type="button" class="px-6 py-3 rounded-lg bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 text-white font-semibold transition-all shadow-md" data-action="add-grouping">
-            <i class="fas fa-plus mr-2"></i>+ Ajouter un Regroupement
-          </button>
-        </div>
-
-        <!-- Liste des Regroupements -->
-        <div class="space-y-4 mb-8">
-          ${state.groupings.length === 0 ? `
-            <div class="text-center py-12 bg-slate-50 rounded-lg border-2 border-dashed border-slate-300">
-              <i class="fas fa-inbox text-6xl text-slate-400 mb-4"></i>
-              <p class="text-lg text-slate-600 font-semibold">Aucun regroupement défini</p>
-              <p class="text-sm text-slate-500 mt-2">Cliquez sur "+ Ajouter un Regroupement" pour commencer</p>
+        <div class="grid lg:grid-cols-[1.6fr_1fr] gap-6">
+          <div class="bg-slate-50 rounded-2xl p-6 border border-slate-200 flex flex-col gap-5">
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <h3 class="text-xl font-bold text-slate-900">1. Sélectionnez les classes</h3>
+                <p class="text-sm text-slate-600">Composez un regroupement (une "passe") de classes à répartir ensemble.</p>
+              </div>
+              <span class="px-3 py-1 rounded-full bg-white border border-slate-200 text-xs text-slate-600 font-semibold">
+                ${state.selectedClasses.length} classe(s) sélectionnée(s)
+              </span>
             </div>
-          ` : state.groupings.map(grouping => `
-            <div class="bg-white rounded-lg border-2 border-slate-200 p-6 hover:border-indigo-400 hover:shadow-md transition-all">
-              <div class="flex justify-between items-start mb-4">
-                <div>
-                  <h4 class="text-xl font-bold text-slate-900">${grouping.label}</h4>
-                  ${grouping.description ? `<p class="text-sm text-slate-600 mt-1">${grouping.description}</p>` : ''}
+
+            <div class="flex flex-wrap gap-2">
+              <button type="button" class="px-4 py-2 rounded-lg bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors border border-slate-200" data-action="select-all-classes">
+                Tout sélectionner
+              </button>
+              <button type="button" class="px-4 py-2 rounded-lg bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors border border-slate-200" data-action="deselect-all-classes">
+                Tout désélectionner
+              </button>
+            </div>
+
+            <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
+              ${classCards}
+            </div>
+
+            <div class="bg-white border border-slate-200 rounded-xl p-4">
+              <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                <div class="flex-1">
+                  <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1" for="pass-name-input">Nom du regroupement</label>
+                  <input id="pass-name-input" type="text" class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500" placeholder="Ex : Regroupement 6°1-6°2" value="${state.newPassLabel || ''}" data-input="pass-name">
                 </div>
-                <div class="flex gap-2">
-                  <button type="button" class="px-4 py-2 rounded-lg bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-medium transition-colors" data-action="edit-grouping" data-id="${grouping.id}" title="Éditer ce regroupement">
-                    <i class="fas fa-edit mr-1"></i>Éditer
-                  </button>
-                  <button type="button" class="px-4 py-2 rounded-lg bg-red-100 hover:bg-red-200 text-red-700 font-medium transition-colors" data-action="delete-grouping" data-id="${grouping.id}" title="Supprimer ce regroupement">
-                    <i class="fas fa-trash mr-1"></i>Supprimer
+                <div class="flex items-end gap-3">
+                  <button type="button" class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold transition-colors" data-action="create-pass">
+                    <i class="fas fa-plus mr-2"></i>Créer le regroupement
                   </button>
                 </div>
               </div>
-
-              <div class="grid grid-cols-3 gap-4 text-sm">
-                <div>
-                  <span class="text-slate-600">Classes:</span>
-                  <p class="font-semibold text-slate-900">${grouping.classes.join(' + ') || 'Aucune'}</p>
-                </div>
-                <div>
-                  <span class="text-slate-600">Nombre de groupes:</span>
-                  <p class="font-semibold text-slate-900">${grouping.groupCount}</p>
-                </div>
-                <div>
-                  <span class="text-slate-600">Status:</span>
-                  <p class="font-semibold ${grouping.active ? 'text-green-600' : 'text-slate-400'}">
-                    ${grouping.active ? '✅ Actif' : '⊘ Inactif'}
-                  </p>
-                </div>
-              </div>
+              <p class="text-xs text-slate-500 mt-3">
+                Chaque regroupement correspond à une passe. Vous pourrez générer et sauvegarder les groupes pour chaque passe sans écraser les précédentes.
+              </p>
             </div>
-          `).join('')}
-        </div>
-
-        <!-- Info Box -->
-        <div class="bg-indigo-50 border border-indigo-200 rounded-xl p-4 flex items-start gap-3">
-          <i class="fas fa-lightbulb text-indigo-600 text-xl mt-0.5"></i>
-          <div class="text-sm text-indigo-900">
-            <p class="font-semibold mb-1">Comment ça marche:</p>
-            <ul class="space-y-1">
-              <li>• <strong>Passe 1</strong>: 6°1 + 6°2 + 6°3 → 3 groupes</li>
-              <li>• <strong>Passe 2</strong>: 6°4 + 6°5 → 4 groupes</li>
-              <li>• Composez tous vos regroupements avant de générer</li>
-            </ul>
           </div>
-        </div>
-      </div>
 
-      <!-- Modal: Créer/Éditer Regroupement -->
-      ${renderGroupingModal()}
-    `;
-  }
+          <div class="space-y-4">
+            <div class="bg-white border border-slate-200 rounded-2xl p-5 h-full flex flex-col">
+              <div class="flex items-center justify-between mb-4">
+                <div>
+                  <h3 class="text-lg font-semibold text-slate-900">2. Vos regroupements</h3>
+                  <p class="text-xs text-slate-600">Sélectionnez un regroupement pour le configurer (offset, nombre de groupes, etc.).</p>
+                </div>
+                <span class="text-xs font-semibold text-slate-500 uppercase tracking-wide">${state.passes.length} regroupement(s)</span>
+              </div>
 
-  // Modal d'édition de regroupement (SPRINT #6)
-  function renderGroupingModal() {
-    const isEditing = state.modal?.isEditing || false;
-    const grouping = isEditing ? state.groupings.find(g => g.id === state.modal.groupingId) : null;
-    const isOpen = state.modal?.type === 'grouping-form';
-
-    return `
-      <div id="grouping-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 ${isOpen ? 'block' : 'hidden'}">
-        <div class="bg-white rounded-lg shadow-2xl p-8 max-w-md w-full mx-4">
-          <h3 class="text-2xl font-bold text-slate-900 mb-6">
-            ${isEditing ? '✏️ Éditer Regroupement' : '✨ Nouveau Regroupement'}
-          </h3>
-
-          <form id="grouping-form" class="space-y-5">
-            <!-- Label -->
-            <div>
-              <label for="grouping-label" class="block text-sm font-semibold text-slate-700 mb-2">Label *</label>
-              <input
-                type="text"
-                id="grouping-label"
-                placeholder="Ex: Passe 1, Passe 2, Alternative..."
-                class="w-full px-4 py-2 rounded-lg border border-slate-300 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none transition"
-                value="${grouping?.label || ''}"
-                required
-              >
-            </div>
-
-            <!-- Description -->
-            <div>
-              <label for="grouping-desc" class="block text-sm font-semibold text-slate-700 mb-2">Description</label>
-              <input
-                type="text"
-                id="grouping-desc"
-                placeholder="Ex: Premier regroupement de 6°..."
-                class="w-full px-4 py-2 rounded-lg border border-slate-300 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none transition"
-                value="${grouping?.description || ''}"
-              >
-            </div>
-
-            <!-- Sélection des classes -->
-            <div>
-              <label class="block text-sm font-semibold text-slate-700 mb-3">Classes *</label>
-              <div class="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto p-3 bg-slate-50 rounded-lg border border-slate-300">
-                ${state.availableClasses.length === 0 ? `
-                  <p class="col-span-full text-sm text-slate-500">Aucune classe disponible</p>
-                ` : state.availableClasses.map(classe => `
-                  <label class="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      class="grouping-class-checkbox"
-                      value="${classe}"
-                      ${grouping?.classes.includes(classe) ? 'checked' : ''}
-                    >
-                    <span class="text-sm text-slate-700">${classe}</span>
-                  </label>
-                `).join('')}
+              <div class="flex-1 overflow-y-auto space-y-3 pr-1">
+                ${state.passes.length === 0 ? `
+                  <div class="empty-pass-card">
+                    <i class="fas fa-layer-group text-2xl text-slate-400 mb-2"></i>
+                    <p class="text-sm text-slate-600 mb-2 font-semibold">Aucun regroupement défini</p>
+                    <p class="text-xs text-slate-500">
+                      Sélectionnez des classes puis cliquez sur « Créer le regroupement » pour planifier votre première passe.
+                    </p>
+                  </div>
+                ` : state.passes.map((pass, idx) => renderPassCard(pass, idx)).join('')}
               </div>
             </div>
-
-            <!-- Nombre de groupes -->
-            <div>
-              <label for="grouping-count" class="block text-sm font-semibold text-slate-700 mb-2">Nombre de groupes *</label>
-              <div class="flex items-center gap-4">
-                <input
-                  type="range"
-                  id="grouping-count"
-                  min="1"
-                  max="10"
-                  value="${grouping?.groupCount || 3}"
-                  class="flex-1"
-                >
-                <span id="grouping-count-display" class="text-2xl font-bold text-indigo-600 min-w-12 text-right">
-                  ${grouping?.groupCount || 3}
-                </span>
-              </div>
-            </div>
-
-            <!-- Boutons -->
-            <div class="flex gap-3 mt-8">
-              <button
-                type="button"
-                class="flex-1 px-4 py-2 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 font-semibold transition-colors"
-                data-action="close-modal"
-              >
-                Annuler
-              </button>
-              <button
-                type="button"
-                class="flex-1 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold transition-colors"
-                data-action="save-grouping"
-              >
-                ${isEditing ? 'Modifier' : 'Créer'}
-              </button>
-            </div>
-          </form>
+          </div>
         </div>
       </div>
     `;
@@ -1021,14 +1310,55 @@
   // ─────────────────────────────────────────────────────────────
 
   function renderStep3_Configure() {
+    const activePass = getActivePass();
+
+    if (!activePass) {
+      return `
+        <div class="max-w-3xl mx-auto text-center py-16">
+          <i class="fas fa-layer-group text-5xl text-slate-300 mb-6"></i>
+          <h3 class="text-2xl font-semibold text-slate-800 mb-3">Aucun regroupement sélectionné</h3>
+          <p class="text-slate-600 mb-6">Revenez à l'étape précédente pour créer ou sélectionner un regroupement de classes. Chaque configuration s'applique à un regroupement précis.</p>
+          <div class="flex justify-center">
+            <button type="button" class="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold" data-action="previous-step">
+              <i class="fas fa-arrow-left mr-2"></i>Retour aux regroupements
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
     const isNeeds = state.groupType === 'needs';
     const isLanguage = state.groupType === 'language';
+    const offsetEnd = state.tempOffsetStart && state.numGroups ? state.tempOffsetStart + state.numGroups - 1 : null;
+
+    const persistModes = [
+      {
+        id: 'continue',
+        label: 'Ajouter à la série existante',
+        description: 'Conserve les groupes précédents et numérote automatiquement les nouveaux à la suite.',
+        icon: 'fa-layer-group'
+      },
+      {
+        id: 'replace',
+        label: 'Remplacer la série',
+        description: 'Purge les anciens groupes TEMP/finalisés pour repartir de zéro.',
+        icon: 'fa-broom'
+      }
+    ];
 
     return `
       <div class="max-w-3xl mx-auto">
         <div class="text-center mb-8">
           <h3 class="text-2xl font-bold text-slate-900 mb-3">Configuration des groupes</h3>
-          <p class="text-slate-600">Définissez les paramètres de génération</p>
+          <p class="text-slate-600">Définissez les paramètres pour <strong>${activePass.name}</strong> (${activePass.classes.join(', ')})</p>
+        </div>
+
+        <div class="bg-indigo-50 border border-indigo-200 rounded-2xl p-5 mb-6 flex items-start gap-3">
+          <i class="fas fa-info-circle text-indigo-500 text-lg mt-1"></i>
+          <div class="text-sm text-indigo-900">
+            <p class="font-semibold">Numérotation actuelle : ${state.tempOffsetStart}${offsetEnd ? ` → ${offsetEnd}` : ''}</p>
+            <p class="text-xs mt-1">Ce regroupement utilise le mode <strong>${state.persistMode === 'continue' ? 'Continuation' : 'Remplacement'}</strong>. Ajustez le point de départ si vous souhaitez poursuivre une série existante.</p>
+          </div>
         </div>
 
         <div class="config-card mb-6">
@@ -1160,6 +1490,62 @@
             </div>
           </div>
         ` : ''}
+
+        <div class="config-card">
+          <div class="config-header">
+            <i class="fas fa-route text-2xl text-amber-600"></i>
+            <div>
+              <h4 class="font-semibold text-slate-900">Workflow multi-passes</h4>
+              <p class="text-sm text-slate-600">Choisissez comment sauvegarder ce regroupement et définissez la numérotation.</p>
+            </div>
+          </div>
+          <div class="config-body space-y-5">
+            <div class="grid sm:grid-cols-2 gap-3">
+              ${persistModes.map(mode => `
+                <label class="radio-card ${state.persistMode === mode.id ? 'selected' : ''}" data-persist-mode="${mode.id}">
+                  <div class="flex items-start gap-3">
+                    <input
+                      type="radio"
+                      name="persistMode"
+                      value="${mode.id}"
+                      ${state.persistMode === mode.id ? 'checked' : ''}
+                    >
+                    <div class="flex-1">
+                      <div class="flex items-center gap-2">
+                        <i class="fas ${mode.icon} text-sm"></i>
+                        <span class="font-medium">${mode.label}</span>
+                      </div>
+                      <p class="text-xs text-slate-500 mt-1">${mode.description}</p>
+                    </div>
+                    <i class="fas fa-check-circle check-icon"></i>
+                  </div>
+                </label>
+              `).join('')}
+            </div>
+
+            <div class="bg-slate-50 border border-slate-200 rounded-xl p-4">
+              <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2" for="offset-start-input">Numérotation des groupes</label>
+              <div class="flex flex-col md:flex-row md:items-center md:gap-4">
+                <div class="flex items-center gap-3">
+                  <span class="text-sm text-slate-600">Commencer à</span>
+                  <input
+                    id="offset-start-input"
+                    type="number"
+                    min="1"
+                    class="w-24 rounded-lg border border-slate-200 px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                    value="${state.tempOffsetStart}"
+                    data-input="offset-start"
+                  >
+                  <span class="text-sm text-slate-500">→ ${offsetEnd ? offsetEnd : '...'}</span>
+                </div>
+                <div class="mt-3 md:mt-0 text-xs text-slate-500">
+                  <p>Utilisez ce réglage pour poursuivre une série existante (ex : commencer à 4 pour ajouter Groupe 4, 5, ...).</p>
+                  ${state.continuationStatus?.nextOffset ? `<p class="mt-1">Offset suggéré : <strong>${state.continuationStatus.nextOffset}</strong></p>` : ''}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     `;
   }
@@ -1169,7 +1555,19 @@
   // ─────────────────────────────────────────────────────────────
 
   function renderStep4_Preview() {
+    const activePass = getActivePass();
+    if (!activePass) {
+      return `
+        <div class="max-w-4xl mx-auto text-center py-16">
+          <i class="fas fa-route text-5xl text-slate-300 mb-6"></i>
+          <h3 class="text-2xl font-semibold text-slate-800 mb-3">Aucun regroupement sélectionné</h3>
+          <p class="text-slate-600">Revenez à l'étape précédente pour choisir un regroupement avant de lancer la génération.</p>
+        </div>
+      `;
+    }
+
     const config = getConfigSummary();
+    const offsetEnd = state.tempOffsetStart && state.numGroups ? state.tempOffsetStart + state.numGroups - 1 : null;
 
     return `
       <div class="max-w-4xl mx-auto">
@@ -1179,6 +1577,17 @@
         </div>
 
         <div class="grid md:grid-cols-2 gap-6 mb-8">
+          <div class="summary-card">
+            <div class="summary-icon bg-gradient-to-br from-sky-500 to-indigo-500">
+              <i class="fas fa-sitemap"></i>
+            </div>
+            <div class="flex-1">
+              <p class="summary-label">Regroupement</p>
+              <p class="summary-value">${activePass.name}</p>
+              <p class="text-xs text-slate-500 mt-1">${activePass.classes.join(', ')}</p>
+            </div>
+          </div>
+
           <div class="summary-card">
             <div class="summary-icon ${GROUP_TYPES[state.groupType].color}">
               ${GROUP_TYPES[state.groupType].icon}
@@ -1211,6 +1620,17 @@
                   <span class="px-3 py-1 bg-slate-100 text-slate-700 rounded-lg text-sm font-medium">${c}</span>
                 `).join('')}
               </div>
+            </div>
+          </div>
+
+          <div class="summary-card md:col-span-2">
+            <div class="summary-icon bg-gradient-to-br from-amber-500 to-orange-500">
+              <i class="fas fa-hashtag"></i>
+            </div>
+            <div class="flex-1">
+              <p class="summary-label">Workflow & numérotation</p>
+              <p class="summary-value">${state.persistMode === 'continue' ? 'Ajout à la série existante' : 'Remplacement complet'}</p>
+              <p class="text-xs text-slate-500 mt-1">Groupes ${state.tempOffsetStart}${offsetEnd ? ` → ${offsetEnd}` : ''}</p>
             </div>
           </div>
 
@@ -1315,6 +1735,8 @@
   // ─────────────────────────────────────────────────────────────
 
   function renderStep5_Groups() {
+    const activePass = getActivePass();
+
     if (state.isLoading) {
       return `
         <div class="flex flex-col items-center justify-center py-20">
@@ -1326,6 +1748,16 @@
             <div class="w-2 h-2 bg-purple-500 rounded-full animate-pulse delay-100"></div>
             <div class="w-2 h-2 bg-pink-500 rounded-full animate-pulse delay-200"></div>
           </div>
+        </div>
+      `;
+    }
+
+    if (!activePass) {
+      return `
+        <div class="flex flex-col items-center justify-center py-20">
+          <i class="fas fa-layer-group text-6xl text-slate-300 mb-6"></i>
+          <p class="text-lg text-slate-600">Aucun regroupement actif</p>
+          <p class="text-sm text-slate-500 mt-2">Revenez aux étapes précédentes pour sélectionner un regroupement avant de manipuler les groupes.</p>
         </div>
       `;
     }
@@ -1342,155 +1774,93 @@
       `;
     }
 
-    // LAYOUT : Adapter le nombre de colonnes selon le nombre de groupes
-    // Objectif : maximiser la HAUTEUR verticale de chaque groupe pour plus de swaps
-    // - 1-3 groupes : autant de colonnes (côte à côte)
-    // - 4 groupes : 2 colonnes (2x2 grid)
-    // - 5-6 groupes : 3 colonnes (max) pour garder hauteur
-    // - 7+ groupes : 3 colonnes + scroll horizontal
-    const groupCount = state.generatedGroups.length;
-    let gridClass = '';
-
-    if (groupCount <= 3) {
-      gridClass = `grid-cols-${groupCount}`; // 1, 2 ou 3 colonnes selon le nombre
-    } else if (groupCount === 4) {
-      gridClass = 'grid-cols-2'; // 2x2 grid
-    } else if (groupCount <= 6) {
-      gridClass = 'grid-cols-3'; // 3 colonnes max pour garder hauteur
-    } else {
-      gridClass = 'grid-cols-3'; // 3 colonnes + scroll pour 7+
-    }
+    const currentOffsetEnd = getCurrentOffsetEnd();
+    const plannedRangeLabel = state.tempOffsetStart && currentOffsetEnd
+      ? `${state.tempOffsetStart} → ${currentOffsetEnd}`
+      : '—';
+    const lastTempRangeLabel = state.lastTempRange?.start && state.lastTempRange?.end
+      ? `${state.lastTempRange.start} → ${state.lastTempRange.end}`
+      : 'Aucune';
+    const lastTempDateLabel = state.lastTempSavedAt ? formatDate(state.lastTempSavedAt) : null;
+    const lastFinalRangeLabel = state.lastFinalRange?.start && state.lastFinalRange?.end
+      ? `${state.lastFinalRange.start} → ${state.lastFinalRange.end}`
+      : 'Aucune';
+    const lastFinalDateLabel = state.lastFinalizedAt ? formatDate(state.lastFinalizedAt) : null;
+    const persistLabel = state.persistMode === 'continue' ? 'Continuation' : 'Remplacement';
 
     return `
-      <div class="flex flex-col h-full">
-        <!-- 🆕 BANDEAU MODE CONTINUATION + REGROUPEMENT ISOLATION -->
-        ${(state.tempOffsetStart > 1 || state.activeGroupingId) ? `
-          <div class="flex-shrink-0 mb-6 bg-gradient-to-r from-blue-50 to-indigo-50 border-l-4 border-indigo-600 p-4 rounded-lg shadow-sm">
-            <div class="flex items-center justify-between mb-2">
-              <p class="text-indigo-900 font-bold text-lg">
-                ${state.activeGroupingId ? '📦' : '🔄'} ${state.activeGroupingId ? 'ISOLATION REGROUPEMENT' : 'MODE CONTINUATION'} ACTIF
-              </p>
-              ${state.activeGroupingId ? `<span class="px-3 py-1 bg-indigo-200 text-indigo-900 rounded-full text-sm font-semibold">${state.activeGroupingId}</span>` : ''}
+      <div>
+        <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-6">
+          <div class="space-y-1">
+            <h3 class="text-2xl font-bold text-slate-900">Groupes – ${activePass.name}</h3>
+            <p class="text-sm text-slate-600">${state.generatedGroups.length} groupe(s) • ${getTotalStudents()} élèves</p>
+            <div class="meta-chip-group">
+              <span class="meta-chip"><i class="fas fa-layer-group"></i>${persistLabel}</span>
+              <span class="meta-chip"><i class="fas fa-sort-numeric-up"></i>Numérotation prévue&nbsp;: ${plannedRangeLabel}</span>
+              <span class="meta-chip"><i class="fas fa-save"></i>Dernière sauvegarde TEMP&nbsp;: ${lastTempRangeLabel}${lastTempDateLabel ? `<span class="meta-chip__hint">(${lastTempDateLabel})</span>` : ''}</span>
+              <span class="meta-chip"><i class="fas fa-check-double"></i>Dernière finalisation&nbsp;: ${lastFinalRangeLabel}${lastFinalDateLabel ? `<span class="meta-chip__hint">(${lastFinalDateLabel})</span>` : ''}</span>
             </div>
-
-            <div class="grid grid-cols-2 gap-3 mt-3">
-              ${state.activeGroupingId ? `
-                <div class="bg-white/60 p-2 rounded border border-indigo-200">
-                  <p class="text-xs text-indigo-700 font-semibold">Regroupement</p>
-                  <p class="text-sm text-indigo-900 font-bold">${state.activeGroupingId}</p>
-                </div>
-              ` : ''}
-
-              ${state.lastTempRange ? `
-                <div class="bg-white/60 p-2 rounded border border-blue-200">
-                  <p class="text-xs text-blue-700 font-semibold">Groupes précédents</p>
-                  <p class="text-sm text-blue-900 font-bold">${getGroupPrefix()}${state.lastTempRange.min}...${state.lastTempRange.max}</p>
-                </div>
-              ` : ''}
-
-              <div class="bg-white/60 p-2 rounded border border-green-200">
-                <p class="text-xs text-green-700 font-semibold">Prochains groupes</p>
-                <p class="text-sm text-green-900 font-bold">${getGroupPrefix()}${state.tempOffsetStart}...${state.tempOffsetStart + state.generatedGroups.length - 1}</p>
-              </div>
-            </div>
-
-            <p class="text-indigo-700 text-xs mt-3 italic border-t border-indigo-200 pt-2">
-              💡 Sauvegarder → "Ajouter" pour continuer | "Remplacer" pour recommencer ${state.activeGroupingId ? ' | Cette passe est isolée' : ''}
-            </p>
           </div>
-        ` : ''}
-
-        <div class="flex-shrink-0 mb-6">
-          <div class="flex items-center justify-between">
-            <div>
-              <h3 class="text-2xl font-bold text-slate-900">Groupes générés</h3>
-              <p class="text-sm text-slate-600 mt-1">
-                ${state.generatedGroups.length} groupe(s) • ${getTotalStudents()} élèves répartis
-              </p>
-            </div>
-            <!-- 🆕 SPRINT #6: ACTION BAR RÉORGANISÉE EN 4 GROUPES -->
-            <div class="flex items-center gap-4 flex-wrap justify-end">
-              <!-- GROUPE 1: CALCUL -->
-              <div class="flex items-center gap-2 border-r border-slate-300 pr-4">
-                <button type="button" class="action-btn bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2" data-action="regenerate" title="Recalculer avec nouvel algorithme">
-                  <i class="fas fa-rotate-right"></i>
-                  Régénérer
-                </button>
-                <button type="button" class="action-btn ${state.showStatistics ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'} hover:bg-indigo-700 px-3 py-2" data-action="toggle-statistics">
-                  <i class="fas fa-chart-bar"></i>
-                  Stats
-                </button>
-              </div>
-
-              <!-- GROUPE 2: SAUVEGARDE -->
-              <div class="flex items-center gap-2 border-r border-slate-300 pr-4">
-                <div class="flex items-center gap-2 bg-slate-100 p-2 rounded-lg">
-                  <button type="button" class="action-btn ${state.saveMode === 'replace' ? 'bg-red-600 text-white' : 'bg-slate-200 text-slate-700'} px-3 py-1 text-sm" data-action="set-save-mode" data-mode="replace" title="Mode REMPLACER: demande confirmation">
-                    <i class="fas fa-arrows-rotate"></i>
-                  </button>
-                  <button type="button" class="action-btn ${state.saveMode === 'append' ? 'bg-green-600 text-white' : 'bg-slate-200 text-slate-700'} px-3 py-1 text-sm" data-action="set-save-mode" data-mode="append" title="Mode AJOUTER: continue la série">
-                    <i class="fas fa-plus-circle"></i>
-                  </button>
-                </div>
-                <button type="button" class="action-btn bg-orange-600 hover:bg-orange-700 text-white px-3 py-2" data-action="save-temp-groups" title="Sauvegarder temporaire (caché)">
-                  <i class="fas fa-save"></i>
-                  Temp
-                </button>
-                <button type="button" class="action-btn bg-green-600 hover:bg-green-700 text-white px-3 py-2" data-action="finalize-temp-groups" title="Finaliser → visible">
-                  <i class="fas fa-check-circle"></i>
-                  Finali
-                </button>
-              </div>
-
-              <!-- GROUPE 3: EXPORTS -->
-              <div class="flex items-center gap-2 border-r border-slate-300 pr-4">
-                <button type="button" class="action-btn bg-blue-100 hover:bg-blue-200 text-blue-700 px-3 py-2" data-action="export-pdf">
-                  <i class="fas fa-file-pdf"></i>
-                  PDF
-                </button>
-                <button type="button" class="action-btn bg-green-100 hover:bg-green-200 text-green-700 px-3 py-2" data-action="export-csv">
-                  <i class="fas fa-file-csv"></i>
-                  CSV
-                </button>
-              </div>
-
-              <!-- GROUPE 4: NAVIGATION & HISTORIQUE -->
-              <div class="flex items-center gap-2">
-                <button type="button" class="action-btn bg-yellow-100 hover:bg-yellow-200 text-yellow-700 px-3 py-2" data-action="load-temp-groups" title="Charger TEMP sauvegardés">
-                  <i class="fas fa-download"></i>
-                  Charger
-                </button>
-                <button type="button" class="action-btn bg-purple-100 hover:bg-purple-200 text-purple-700 px-3 py-2" data-action="show-snapshots" title="Snapshots + restore">
-                  <i class="fas fa-history"></i>
-                  📸
-                </button>
-                <button type="button" class="action-btn bg-cyan-100 hover:bg-cyan-200 text-cyan-700 px-3 py-2" data-action="show-audit-history" title="Audit complet">
-                  <i class="fas fa-list"></i>
-                  📋
-                </button>
-              </div>
-            </div>
+          <div class="flex flex-wrap items-center gap-3">
+            <label class="text-xs font-semibold text-slate-500 uppercase tracking-wide" for="active-pass-select">Regroupement</label>
+            <select id="active-pass-select" class="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500" data-input="active-pass-select">
+              ${state.passes.map(pass => `<option value="${pass.id}" ${pass.id === state.activePassId ? 'selected' : ''}>${pass.name}</option>`).join('')}
+            </select>
+            <button type="button" class="action-btn bg-slate-100 hover:bg-slate-200 text-slate-700" data-action="go-to-step-2">
+              <i class="fas fa-sitemap"></i>
+              Gérer les passes
+            </button>
           </div>
         </div>
 
-        <!-- Contenu flexible et scrollable -->
-        <div class="flex-1 overflow-y-auto">
-          ${state.showStatistics ? `
-            <div class="flex gap-6 h-full">
-              <!-- Groupes: flex-shrink-0 pour éviter l'écrasement -->
-              <div class="flex-shrink-0 overflow-y-auto" style="min-width: 50%;">
-                <div class="grid ${gridClass} gap-4 pr-4" id="groups-container">
-                  ${state.generatedGroups.map((group, index) => renderGroupCard(group, index)).join('')}
-                </div>
-              </div>
+        <div class="grid gap-3 lg:grid-cols-2 xl:grid-cols-[1.3fr_1fr] mb-5">
+          <div class="flex flex-wrap gap-2">
+            <button type="button" class="action-btn bg-slate-100 hover:bg-slate-200 text-slate-700" data-action="regenerate">
+              <i class="fas fa-rotate-right"></i>
+              Régénérer
+            </button>
+            <button type="button" class="action-btn bg-orange-600 hover:bg-orange-700 text-white" data-action="save-temp-groups">
+              <i class="fas fa-save"></i>
+              Sauvegarder TEMP
+            </button>
+            <button type="button" class="action-btn bg-green-600 hover:bg-green-700 text-white" data-action="finalize-temp-groups">
+              <i class="fas fa-check-circle"></i>
+              Finaliser
+            </button>
+            <button type="button" class="action-btn bg-yellow-100 hover:bg-yellow-200 text-yellow-700" data-action="load-temp-groups">
+              <i class="fas fa-download"></i>
+              Charger TEMP
+            </button>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button type="button" class="action-btn ${state.showStatistics ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'} hover:bg-indigo-700" data-action="toggle-statistics">
+              <i class="fas fa-chart-bar"></i>
+              Statistiques
+            </button>
+            <button type="button" class="action-btn bg-blue-100 hover:bg-blue-200 text-blue-700" data-action="export-pdf">
+              <i class="fas fa-file-pdf"></i>
+              Export PDF
+            </button>
+            <button type="button" class="action-btn bg-green-100 hover:bg-green-200 text-green-700" data-action="export-csv">
+              <i class="fas fa-file-csv"></i>
+              Export CSV
+            </button>
+            <button type="button" class="action-btn bg-slate-100 hover:bg-slate-200 text-slate-700" data-action="create-snapshot">
+              <i class="fas fa-camera"></i>
+              Snapshot
+            </button>
+            <button type="button" class="action-btn bg-slate-100 hover:bg-slate-200 text-slate-700" data-action="refresh-snapshots">
+              <i class="fas fa-rotate"></i>
+              Historique
+            </button>
+          </div>
+        </div>
 
-              <!-- Stats: flex-1 pour prendre l'espace restant -->
-              <div class="flex-1 overflow-y-auto border-l border-slate-200 pl-6">
-                ${renderStatisticsPanel()}
-              </div>
-            </div>
-          ` : `
-            <div class="grid ${gridClass} gap-4" id="groups-container">
+        ${renderSnapshotHistory()}
+
+        <div class="flex flex-col lg:flex-row gap-6">
+          <div class="flex-1">
+            <div class="grid ${state.showStatistics ? 'md:grid-cols-2 xl:grid-cols-3' : 'md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5'} gap-4" id="groups-container">
               ${state.generatedGroups.map((group, index) => renderGroupCard(group, index)).join('')}
             </div>
           `}
@@ -1510,6 +1880,8 @@
 
   function renderGroupCard(group, index) {
     const stats = calculateGroupStats(group);
+    const displayIndex = typeof group.index === 'number' ? group.index : (state.tempOffsetStart || 1) + index;
+    const displayName = group.name || `Groupe ${displayIndex}`;
 
     // 🆕 SPRINT #6: Afficher le vrai numéro du groupe (en tenant compte de l'offset)
     const groupNumber = state.tempOffsetStart + index;
@@ -1523,17 +1895,8 @@
     return `
       <div class="group-card" data-group-index="${index}">
         <div class="group-header ${GROUP_TYPES[state.groupType].color}">
-          <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
-            <div>
-              <h4 class="group-title">${groupLabel}</h4>
-              <!-- 🆕 SPRINT #6: Ajouter contexte de regroupement + range pédagogique -->
-              <div style="font-size: 0.7rem; opacity: 0.85; margin-top: 0.35rem; display: flex; gap: 0.5rem; flex-wrap: wrap;">
-                <code style="background: rgba(255,255,255,0.3); padding: 0.2rem 0.4rem; border-radius: 0.2rem;">${groupName}</code>
-                ${state.activeGroupingId ? `<span style="background: rgba(255,255,255,0.3); padding: 0.2rem 0.4rem; border-radius: 0.2rem;">📦 ${groupingContext}</span>` : ''}
-              </div>
-            </div>
-            <span class="group-count">${group.students.length} élèves</span>
-          </div>
+          <h4 class="group-title">${displayName}</h4>
+          <span class="group-count">${group.students.length} élèves</span>
         </div>
 
         <div class="group-stats">
@@ -1559,6 +1922,68 @@
           ${group.students.map(student => renderStudentCard(student)).join('')}
         </div>
       </div>
+    `;
+  }
+
+  function renderSnapshotHistory() {
+    if (!state.groupType) return '';
+
+    const isAppsScriptAvailable = Boolean(google?.script?.run);
+    const subtitle = GROUP_TYPES[state.groupType]?.title || 'Groupes';
+    const content = !isAppsScriptAvailable
+      ? `<p class="text-sm text-slate-500">Historique disponible uniquement dans Google Sheets (Apps Script).</p>`
+      : state.snapshotLoading
+        ? `<div class="text-sm text-slate-600 flex items-center gap-2"><span class="inline-block w-3 h-3 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></span>Chargement des snapshots...</div>`
+        : state.snapshotError
+          ? `<p class="text-sm text-red-600">${state.snapshotError}</p>`
+          : state.snapshots.length === 0
+            ? `<p class="text-sm text-slate-500">Aucun snapshot enregistré pour le moment. Créez un premier instantané pour conserver une version de référence.</p>`
+            : `<ul class="space-y-3">${state.snapshots.map(renderSnapshotListItem).join('')}</ul>`;
+
+    return `
+      <div class="mt-6">
+        <div class="bg-white border border-slate-200 rounded-2xl p-4">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <h4 class="text-base font-semibold text-slate-900 flex items-center gap-2">
+                <i class="fas fa-clock-rotate-left text-indigo-600"></i>
+                Historique des versions (${subtitle})
+              </h4>
+              <p class="text-xs text-slate-500 mt-1">Les 5 dernières captures conservées côté Apps Script.</p>
+            </div>
+            <div class="flex items-center gap-2">
+              <button type="button" class="action-btn bg-slate-100 hover:bg-slate-200 text-slate-700" data-action="refresh-snapshots" ${!isAppsScriptAvailable ? 'disabled' : ''}>
+                <i class="fas fa-rotate"></i>
+                Actualiser
+              </button>
+            </div>
+          </div>
+          <div class="mt-4">
+            ${content}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderSnapshotListItem(snapshot) {
+    const classes = Array.isArray(snapshot.metadata?.selectedClasses)
+      ? snapshot.metadata.selectedClasses.join(', ')
+      : (snapshot.metadata?.selectedClasses || '—');
+    const distribution = snapshot.metadata?.distributionLabel || snapshot.metadata?.distributionType || '';
+    const disabledAttr = state.snapshotLoading ? 'disabled' : '';
+
+    return `
+      <li class="flex items-center justify-between gap-4 bg-slate-50 border border-slate-200 rounded-xl p-3">
+        <div class="min-w-0">
+          <p class="font-semibold text-slate-900 truncate">${formatDate(snapshot.timestamp)}</p>
+          <p class="text-xs text-slate-500 mt-1 truncate">${snapshot.groupCount || 0} groupe(s) • Classes : ${classes}</p>
+          ${distribution ? `<p class=\"text-xs text-slate-400 mt-1 truncate\">${distribution}</p>` : ''}
+        </div>
+        <button type="button" class="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold transition" data-action="restore-snapshot" data-snapshot-id="${snapshot.snapshotId}" ${disabledAttr}>
+          <i class="fas fa-rotate-left mr-1"></i>Restaurer
+        </button>
+      </li>
     `;
   }
 
@@ -1653,8 +2078,8 @@
 
   function renderStatisticsPanel() {
     return `
-      <div class="statistics-panel w-96">
-        <div class="bg-white rounded-2xl border-2 border-slate-200 overflow-hidden sticky top-4">
+      <div class="statistics-panel w-full lg:w-1/3 max-w-sm">
+        <div class="bg-white rounded-2xl border-2 border-slate-200 overflow-hidden lg:sticky lg:top-4">
           <div class="bg-gradient-to-br from-indigo-600 to-purple-600 text-white p-4">
             <h4 class="font-bold text-lg flex items-center gap-2">
               <i class="fas fa-chart-pie"></i>
@@ -1674,12 +2099,14 @@
   function renderGroupStatistics(group, index) {
     const stats = calculateGroupStats(group);
     const scoreDistribution = calculateScoreDistribution(group);
+    const displayIndex = typeof group.index === 'number' ? group.index : (state.tempOffsetStart || 1) + index;
+    const displayName = group.name || `Groupe ${displayIndex}`;
 
     return `
       <div class="mb-4 last:mb-0">
         <div class="bg-slate-50 rounded-xl p-3 border border-slate-200">
           <div class="flex items-center justify-between mb-3">
-            <h5 class="font-semibold text-slate-900">${group.name || `Groupe ${index + 1}`}</h5>
+            <h5 class="font-semibold text-slate-900">${displayName}</h5>
             <span class="text-xs bg-slate-200 text-slate-700 px-2 py-1 rounded-full font-medium">${group.students.length}</span>
           </div>
 
@@ -2120,107 +2547,88 @@
     const selectAllBtn = qs('[data-action="select-all-classes"]', state.modal);
     const deselectAllBtn = qs('[data-action="deselect-all-classes"]', state.modal);
     const retryBtn = qs('[data-action="retry-load"]', state.modal);
+    const passNameInput = qs('[data-input="pass-name"]', state.modal);
+    const createPassBtn = qs('[data-action="create-pass"]', state.modal);
+    const activePassSelect = qs('[data-input="active-pass-select"]', state.modal);
+    const goStep2Btn = qs('[data-action="go-to-step-2"]', state.modal);
 
     if (selectAllBtn) selectAllBtn.onclick = selectAllClasses;
     if (deselectAllBtn) deselectAllBtn.onclick = deselectAllClasses;
     if (retryBtn) retryBtn.onclick = loadAvailableClasses;
-
-    // 🆕 Étape 2 : Groupings Composer (Multi-pass) - Event handlers
-    const addGroupingBtn = qs('[data-action="add-grouping"]');
-    const editGroupingBtns = qsa('[data-action="edit-grouping"]');
-    const deleteGroupingBtns = qsa('[data-action="delete-grouping"]');
-    const saveGroupingBtn = qs('[data-action="save-grouping"]');
-    const closeModalBtn = qs('[data-action="close-modal"]');
-    const groupingClassCheckboxes = qsa('.grouping-class-checkbox');
-    const groupingCountSlider = qs('[id="grouping-count"]');
-
-    if (addGroupingBtn) {
-      addGroupingBtn.onclick = () => {
-        state.modal = { type: 'grouping-form' };
+    if (passNameInput) passNameInput.oninput = (e) => { state.newPassLabel = e.target.value; };
+    if (createPassBtn) {
+      createPassBtn.onclick = () => {
+        const pass = createPassFromSelection();
+        if (pass) {
+          showToast(`Regroupement « ${pass.name} » créé`, 'success');
+          updateUI();
+        }
+      };
+    }
+    if (activePassSelect) {
+      activePassSelect.onchange = (e) => {
+        setActivePass(e.target.value);
+        updateUI();
+      };
+    }
+    if (goStep2Btn) {
+      goStep2Btn.onclick = () => {
+        state.currentStep = 2;
         updateUI();
       };
     }
 
-    editGroupingBtns.forEach(btn => {
-      btn.onclick = (e) => {
-        const groupingId = e.currentTarget.getAttribute('data-id');
-        state.modal = { type: 'grouping-form', groupingId, isEditing: true };
-        updateUI();
-      };
-    });
-
-    deleteGroupingBtns.forEach(btn => {
-      btn.onclick = (e) => {
-        const groupingId = e.currentTarget.getAttribute('data-id');
-        const grouping = state.groupings.find(g => g.id === groupingId);
-        const confirm = window.confirm(`Êtes-vous sûr de supprimer le regroupement "${grouping?.label}"?`);
-        if (confirm) {
-          deleteGrouping(groupingId);
+    qsa('[data-action="set-active-pass"]', state.modal).forEach(btn => {
+      btn.onclick = () => {
+        const passId = btn.dataset.passId;
+        if (passId) {
+          setActivePass(passId);
           updateUI();
         }
       };
     });
 
-    if (closeModalBtn) {
-      closeModalBtn.onclick = () => {
-        state.modal = null;
+    qsa('[data-action="delete-pass"]', state.modal).forEach(btn => {
+      btn.onclick = () => {
+        const passId = btn.dataset.passId;
+        if (!passId) return;
+        const pass = state.passes.find(p => p.id === passId);
+        const label = pass?.name || 'ce regroupement';
+        if (windowRef.confirm(`Supprimer ${label} ?`)) {
+          removePass(passId);
+          updateUI();
+        }
+      };
+    });
+
+    qsa('[data-persist-mode]', state.modal).forEach(el => {
+      el.onclick = () => {
+        const mode = el.dataset.persistMode;
+        if (!mode) return;
+        state.persistMode = mode;
+        syncActivePassFromState();
         updateUI();
       };
-    }
+    });
 
-    if (saveGroupingBtn) {
-      saveGroupingBtn.onclick = () => {
-        const labelInput = qs('[id="grouping-label"]');
-        const descInput = qs('[id="grouping-desc"]');
-        const countInput = qs('[id="grouping-count"]');
-        const selectedClasses = Array.from(qsa('.grouping-class-checkbox:checked'))
-          .map(cb => cb.value);
-
-        if (!labelInput?.value?.trim()) {
-          showToast('Veuillez entrer un nom pour le regroupement', 'warning');
-          return;
-        }
-
-        if (selectedClasses.length === 0) {
-          showToast('Veuillez sélectionner au moins une classe', 'warning');
-          return;
-        }
-
-        const groupCount = parseInt(countInput?.value || 3);
-        const isEditing = state.modal?.isEditing || false;
-        const groupingLabel = labelInput.value.trim();
-
-        if (isEditing && state.modal?.groupingId) {
-          // Mode édition : mettre à jour le regroupement existant
-          const groupingId = state.modal.groupingId;
-          const grouping = state.groupings.find(g => g.id === groupingId);
-          if (grouping) {
-            grouping.label = groupingLabel;
-            grouping.description = descInput?.value?.trim() || '';
-            grouping.classes = selectedClasses;
-            grouping.groupCount = groupCount;
-          }
+    const offsetInput = qs('[data-input="offset-start"]', state.modal);
+    if (offsetInput) {
+      offsetInput.onchange = (e) => {
+        const value = parseInt(e.target.value, 10);
+        if (Number.isFinite(value) && value > 0) {
+          state.tempOffsetStart = value;
+          state.generatedGroups = applyOffsetToGroups(state.generatedGroups, value);
+          syncActivePassFromState();
+          updateUI();
         } else {
-          // Mode création : ajouter un nouveau regroupement
-          createNewGrouping(groupingLabel, selectedClasses, groupCount, descInput?.value?.trim());
-        }
-
-        state.modal = null;
-        updateUI();
-        const action = isEditing ? 'modifié' : 'créé';
-        showToast(`✅ Regroupement "${groupingLabel}" ${action} avec succès!`, 'success');
-      };
-    }
-
-    // Mise à jour du compteur de groupes en temps réel
-    if (groupingCountSlider) {
-      groupingCountSlider.oninput = (e) => {
-        const display = qs('[id="grouping-count-display"]');
-        if (display) {
-          display.textContent = e.target.value;
+          e.target.value = state.tempOffsetStart;
         }
       };
     }
+
+    qsa('[data-action="previous-step"]', state.modal).forEach(btn => {
+      btn.onclick = previousStep;
+    });
 
     // Étape 3 : Configuration
     const numGroupsRange = qs('[data-input="numGroups"]', state.modal);
@@ -2229,6 +2637,7 @@
         state.numGroups = parseInt(e.target.value);
         const display = qs('[data-display="numGroups"]', state.modal);
         if (display) display.textContent = state.numGroups;
+        syncActivePassFromState();
       };
     }
 
@@ -2268,8 +2677,9 @@
     const finalizeTempBtn = qs('[data-action="finalize-temp-groups"]', state.modal);
     const exportPdfBtn = qs('[data-action="export-pdf"]', state.modal);
     const exportCsvBtn = qs('[data-action="export-csv"]', state.modal);
-    const snapshotsBtn = qs('[data-action="show-snapshots"]', state.modal);
-    const auditHistoryBtn = qs('[data-action="show-audit-history"]', state.modal);
+    const snapshotBtn = qs('[data-action="create-snapshot"]', state.modal);
+    const refreshSnapshotsBtn = qs('[data-action="refresh-snapshots"]', state.modal);
+    const restoreSnapshotButtons = qsa('[data-action="restore-snapshot"]', state.modal);
 
     if (toggleStatsBtn) toggleStatsBtn.onclick = toggleStatistics;
     if (regenerateBtn) regenerateBtn.onclick = generateGroups;
@@ -2299,26 +2709,12 @@
     if (finalizeTempBtn) finalizeTempBtn.onclick = finalizeTempGroupsUI;
     if (exportPdfBtn) exportPdfBtn.onclick = exportToPDF;
     if (exportCsvBtn) exportCsvBtn.onclick = exportToCSV;
-    if (snapshotsBtn) {
-      snapshotsBtn.onclick = () => {
-        if (state.generatedGroups.length > 0) {
-          const groupName = `${getGroupPrefix()}${state.tempOffsetStart}`;
-          showSnapshotBrowser(groupName);
-        } else {
-          showToast('Aucun groupe généré. Finalisez d\'abord des groupes pour voir les snapshots.', 'info');
-        }
-      };
-    }
-    if (auditHistoryBtn) {
-      auditHistoryBtn.onclick = () => {
-        if (state.generatedGroups.length > 0) {
-          const groupName = `${getGroupPrefix()}${state.tempOffsetStart}`;
-          showAuditHistory(groupName);
-        } else {
-          showToast('Aucun groupe généré. Finalisez d\'abord des groupes pour voir l\'historique.', 'info');
-        }
-      };
-    }
+    if (snapshotBtn) snapshotBtn.onclick = createSnapshotUI;
+    if (refreshSnapshotsBtn) refreshSnapshotsBtn.onclick = () => fetchSnapshotHistory(true);
+    restoreSnapshotButtons.forEach(btn => {
+      const snapshotId = btn.dataset.snapshotId;
+      btn.onclick = () => restoreSnapshotUI(snapshotId);
+    });
 
     // Initialiser Drag & Drop si on est à l'étape 5
     if (state.currentStep === 5 && state.generatedGroups.length > 0) {
@@ -2379,50 +2775,41 @@
   }
 
   function resetToStep1() {
-    // Si une sauvegarde TEMP précédente existe, proposer "Continuer" vs "Recommencer"
-    if (state.lastTempRange && state.lastTempRange.count > 0) {
-      const continueChoice = confirm(
-        `📊 Vague précédente: ${state.lastTempRange.typePrefix}${state.lastTempRange.min} à ` +
-        `${state.lastTempRange.typePrefix}${state.lastTempRange.max} (${state.lastTempRange.count} groupes)\n\n` +
-        `Voulez-vous AJOUTER une nouvelle vague à cette série?\n\n` +
-        `[OK] Continuer la série (prochains numéros: ${state.tempOffsetStart}+)\n` +
-        `[Annuler] Recommencer une nouvelle série`
-      );
-
-      if (continueChoice) {
-        // Continuer la série: réinitialiser les groupes mais conserver l'offset
-        state.currentStep = 1;
-        state.selectedClasses = [];
-        state.generatedGroups = [];
-        state.persistMode = true; // Flag pour les saveMode par défaut
-        // groupType reste le même
-        showToast(
-          `Prochains groupes seront numérotés à partir de ${state.tempOffsetStart}`,
-          'info'
-        );
-      } else {
-        // Recommencer: réinitialiser TOUT
-        state.currentStep = 1;
-        state.groupType = null;
-        state.selectedClasses = [];
-        state.generatedGroups = [];
-        state.lastTempRange = null;
-        state.tempOffsetStart = 1;
-        state.persistMode = false;
-        showToast('Nouvelle série lancée', 'info');
-      }
-    } else {
-      // Pas de sauvegarde précédente: reset simple
-      state.currentStep = 1;
-      state.groupType = null;
-      state.selectedClasses = [];
-      state.generatedGroups = [];
-    }
+    state.currentStep = 1;
+    state.groupType = null;
+    state.selectedClasses = [];
+    state.generatedGroups = [];
+    state.snapshots = [];
+    state.snapshotLoaded = false;
+    state.snapshotLoading = false;
+    state.snapshotError = null;
+    state.passes = [];
+    state.activePassId = null;
+    state.passSequence = 1;
+    state.persistMode = 'continue';
+    state.tempOffsetStart = 1;
+    state.lastTempRange = { start: null, end: null };
+    state.continuationStatus = null;
+    state.continuationStatusError = null;
+    state.isLoadingContinuation = false;
+    state.newPassLabel = '';
     updateUI();
   }
 
   function selectGroupType(type) {
     state.groupType = type;
+    state.snapshots = [];
+    state.snapshotLoaded = false;
+    state.snapshotLoading = false;
+    state.snapshotError = null;
+    state.passes = [];
+    state.activePassId = null;
+    state.passSequence = 1;
+    state.persistMode = 'continue';
+    state.tempOffsetStart = 1;
+    state.lastTempRange = { start: null, end: null };
+    state.newPassLabel = '';
+    fetchContinuationStatus();
     updateUI();
     // Auto-avancer après sélection
     setTimeout(() => nextStep(), 300);
@@ -2449,6 +2836,7 @@
       console.log('   ❌ Retirée (avant:', before, 'après:', after, ')');
     }
     console.log('   Après:', state.selectedClasses);
+    syncActivePassFromState();
     updateUI();
   }
 
@@ -2457,6 +2845,7 @@
     console.log('   availableClasses:', state.availableClasses);
     state.selectedClasses = [...state.availableClasses];
     console.log('   selectedClasses après:', state.selectedClasses);
+    syncActivePassFromState();
     updateUI();
   }
 
@@ -2465,11 +2854,13 @@
     console.log('   Avant:', state.selectedClasses);
     state.selectedClasses = [];
     console.log('   Après:', state.selectedClasses);
+    syncActivePassFromState();
     updateUI();
   }
 
   function changeNumGroups(delta) {
     state.numGroups = Math.max(1, Math.min(10, state.numGroups + delta));
+    syncActivePassFromState();
     updateUI();
   }
 
@@ -2510,6 +2901,17 @@
 
     // Re-attach event listeners
     attachEventListeners();
+
+    if (state.currentStep === 5) {
+      if (!state.snapshotLoaded && !state.snapshotLoading && google?.script?.run) {
+        fetchSnapshotHistory();
+      }
+    } else {
+      state.snapshots = [];
+      state.snapshotError = null;
+      state.snapshotLoaded = false;
+      state.snapshotLoading = false;
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -2662,86 +3064,40 @@
     }
   }
 
-  // ═══════════════════════════════════════════════════════════════
-  //  SPRINT #1 : CHARGEMENT CONTINUATION (PropertiesService)
-  // ═══════════════════════════════════════════════════════════════
-
-  function loadContinuationIfNeeded() {
-    // Chargement unique des métadonnées de continuation
-    // Appelée une seule fois au démarrage step 1
-    if (!google?.script?.run) {
-      console.warn('[GroupsModule] google.script.run non disponible, skip continuation load');
+  function fetchContinuationStatus() {
+    if (!google?.script?.run || !state.groupType) {
+      state.continuationStatus = null;
       return;
     }
 
+    state.isLoadingContinuation = true;
+    state.continuationStatusError = null;
+    updateUI();
+
     google.script.run
-      .withSuccessHandler((result) => {
-        if (!result?.success) {
-          console.log('[GroupsModule] ℹ️  Pas de continuation metadata trouvée');
-          return;
-        }
-
-        const metadata = result.metadata;
-        if (!metadata || !metadata.lastTempRange) {
-          console.log('[GroupsModule] ℹ️  Continuation metadata vide');
-          return;
-        }
-
-        // 🔄 Restaurer l'état de continuation depuis le serveur
-        state.lastTempRange = metadata.lastTempRange;
-        state.tempOffsetStart = metadata.tempOffsetStart;
-        state.persistMode = metadata.persistMode || false;
-
-        console.log('[GroupsModule] ✅ Continuation metadata restaurée!');
-        console.log('   lastTempRange:', state.lastTempRange);
-        console.log('   tempOffsetStart:', state.tempOffsetStart);
-        console.log('   persistMode:', state.persistMode);
-
-        // Montrer le dialog de continuation si applicable
-        if (state.lastTempRange && state.lastTempRange.count > 0) {
-          const continueChoice = confirm(
-            `📊 Vague précédente restaurée: ${state.lastTempRange.typePrefix}${state.lastTempRange.min} à ` +
-            `${state.lastTempRange.typePrefix}${state.lastTempRange.max} (${state.lastTempRange.count} groupes)\n\n` +
-            `Voulez-vous AJOUTER une nouvelle vague à cette série?\n\n` +
-            `[OK] Continuer la série (prochains numéros: ${state.tempOffsetStart}+)\n` +
-            `[Annuler] Recommencer une nouvelle série`
-          );
-
-          if (continueChoice) {
-            state.persistMode = true;
-            state.generatedGroups = [];
-            state.selectedClasses = [];
-            // groupType persiste
-            showToast(
-              `🔄 Continuation activée : prochains groupes ${state.tempOffsetStart}+`,
-              'success'
-            );
-          } else {
-            // Supprimer les métadonnées pour recommencer
-            google.script.run
-              .withSuccessHandler(() => {
-                console.log('[GroupsModule] Métadonnées de continuation supprimées');
-              })
-              .clearContinuationMetadata(state.groupType);
-
-            state.lastTempRange = null;
-            state.tempOffsetStart = 1;
-            state.persistMode = false;
-            showToast('🔄 Nouvelle série lancée', 'info');
+      .withSuccessHandler(result => {
+        state.isLoadingContinuation = false;
+        if (result?.success) {
+          state.continuationStatus = result;
+          if (!state.passes.length) {
+            state.tempOffsetStart = result.nextOffset || 1;
+            state.lastTempRange = result.lastTempRange ? { ...result.lastTempRange } : { start: null, end: null };
+            state.lastTempSavedAt = result.lastTempUpdated || null;
+            state.lastFinalRange = result.lastFinalizedRange ? { ...result.lastFinalizedRange } : { start: null, end: null };
+            state.lastFinalizedAt = result.lastFinalizedAt || null;
           }
+        } else {
+          state.continuationStatusError = result?.error || 'Impossible de lire les métadonnées';
         }
-
         updateUI();
       })
-      .withFailureHandler((error) => {
-        console.error('[GroupsModule] Erreur lors du chargement continuation:', error);
+      .withFailureHandler(error => {
+        state.isLoadingContinuation = false;
+        state.continuationStatusError = error?.message || String(error);
+        updateUI();
       })
-      .loadContinuationMetadata(state.groupType);
+      .getContinuationStatus({ type: state.groupType });
   }
-
-  // ═══════════════════════════════════════════════════════════════
-  //  CHARGEMENT DES ÉLÈVES
-  // ═══════════════════════════════════════════════════════════════
 
   function loadStudentsFromClasses() {
     console.log('[GroupsModule] ════════════════════════════════════════════');
@@ -3042,9 +3398,11 @@
 
     console.log('[GroupsModule] ✅ Liste équilibrée (F/M entrelacées, score composite): ' + balanced.length + ' élèves');
 
-    // 🆕 ÉTAPE 3 : Créer groupes avec distribution intelligente
+    // 2. On prépare les groupes
+    const baseIndex = state.tempOffsetStart || 1;
     const groups = Array.from({ length: num }, (_, idx) => ({
-      name: `Groupe ${state.tempOffsetStart + idx}`,
+      name: `Groupe ${baseIndex + idx}`,
+      index: baseIndex + idx,
       students: []
     }));
 
@@ -3110,6 +3468,7 @@
         generateGroupsLocally(); // crée state.generatedGroups
         state.isLoading = false;
         state.currentStep = 5;   // on passe à l'aperçu
+        syncActivePassFromState();
         updateUI();
         showToast(`${state.generatedGroups.length} groupes générés`, 'success');
       })
@@ -3187,6 +3546,7 @@
     updateGroupStats(toGroupIndex);
 
     showToast(`${student.nom} déplacé vers ${state.generatedGroups[toGroupIndex].name}`, 'info', 2000);
+    syncActivePassFromState();
   }
 
   function updateGroupStats(groupIndex) {
@@ -3239,35 +3599,49 @@
       return;
     }
 
-    // D'abord vérifier s'il y a des TEMP existants pour ce type
-    showToast('Vérification des groupes existants...', 'info');
+    const payload = buildSnapshotPayload();
+    const groupCount = Array.isArray(payload.groups) ? payload.groups.length : 0;
+    payload.timestamp = new Date().toISOString();
+
+    showToast('💾 Sauvegarde temporaire en cours...', 'info');
 
     google.script.run
-      .withSuccessHandler((listResult) => {
-        // Si des TEMP existent, vérifier le mode utilisateur
-        if (listResult.success && listResult.count > 0) {
-          const existingInfo = `Groupes TEMP existants trouvés: ${listResult.minNumber} à ${listResult.maxNumber} (${listResult.count} groupes)`;
-          console.log(existingInfo);
+      .withSuccessHandler((result) => {
+        if (result.success) {
+          showToast(`✅ Groupes sauvegardés temporairement (gr${result.typePrefix}1TEMP, etc.)`, 'success');
+          console.log('[GroupsModule] Sauvegarde temp réussie:', result);
 
-          // Si mode='replace', demander confirmation
-          if (state.saveMode === 'replace') {
-            const confirmReplace = confirm(
-              `⚠️ Mode REMPLACER activé!\n\n${existingInfo}\n\n` +
-              `Si vous continuez, vous PERDREZ ces ${listResult.count} groupes temporaires!\n\n` +
-              `Vos groupes seront renumérotés de 1 à ${state.generatedGroups.length}.\n\n` +
-              `Souhaitez-vous continuer?`
-            );
-            if (!confirmReplace) {
-              showToast('Sauvegarde annulée', 'warning');
-              return;
-            }
-          } else {
-            // Mode='append': informer l'utilisateur que ça va s'ajouter
-            showToast(
-              `Mode AJOUTER: vos groupes seront numérotés de ${listResult.maxNumber + 1} à ${listResult.maxNumber + state.generatedGroups.length}`,
-              'info'
-            );
+          if (typeof result.offsetStart === 'number') {
+            state.tempOffsetStart = result.offsetStart;
           }
+          const range = (result.createdRange && typeof result.createdRange.start === 'number' && typeof result.createdRange.end === 'number')
+            ? { ...result.createdRange }
+            : (groupCount > 0 && typeof result.offsetStart === 'number' && typeof result.offsetEnd === 'number' && result.offsetEnd >= result.offsetStart
+              ? { start: result.offsetStart, end: result.offsetEnd }
+              : null);
+          state.lastTempRange = range || { start: null, end: null };
+          state.lastTempSavedAt = result.timestamp || payload.timestamp;
+          if (result.persistMode) {
+            state.persistMode = result.persistMode;
+          }
+
+          const activePass = getActivePass();
+          if (activePass) {
+            activePass.lastTempRange = state.lastTempRange ? { ...state.lastTempRange } : { start: null, end: null };
+            activePass.lastSavedAt = state.lastTempSavedAt;
+            activePass.lastCreatedTempSheets = Array.isArray(result.createdSheets) ? result.createdSheets : [];
+            activePass.offsetStart = state.tempOffsetStart;
+            activePass.persistMode = state.persistMode;
+          }
+
+          if (typeof result.nextOffset === 'number') {
+            state.continuationStatus = state.continuationStatus || {};
+            state.continuationStatus.nextOffset = result.nextOffset;
+          }
+
+          syncActivePassFromState();
+          fetchContinuationStatus();
+          updateUI();
         } else {
           // Aucun TEMP existant
           console.log('Aucun groupe TEMP existant pour ce type');
@@ -3365,6 +3739,196 @@
     }
   }
 
+  function buildSnapshotPayload() {
+    const baseConfig = {
+      selectedClasses: state.selectedClasses,
+      numGroups: state.numGroups,
+      groupTypeLabel: GROUP_TYPES[state.groupType]?.title || state.groupType
+    };
+
+    if (state.groupType === 'needs') {
+      baseConfig.subject = state.selectedSubject;
+      baseConfig.subjectLabel = SUBJECTS[state.selectedSubject]?.label || state.selectedSubject;
+      baseConfig.distributionType = state.distributionType;
+      baseConfig.distributionLabel = DISTRIBUTION_TYPES[state.distributionType]?.label || state.distributionType;
+    }
+
+    if (state.groupType === 'language') {
+      baseConfig.language = state.selectedLanguage;
+      baseConfig.languageLabel = state.selectedLanguage;
+    }
+
+    const activePass = getActivePass();
+    const baseIndex = state.tempOffsetStart || 1;
+
+    return {
+      type: state.groupType,
+      persistMode: state.persistMode,
+      offsetStart: baseIndex,
+      passId: activePass?.id || null,
+      passName: activePass?.name || null,
+      config: {
+        ...baseConfig,
+        offsetStart: baseIndex,
+        persistMode: state.persistMode,
+        passId: activePass?.id || null,
+        passName: activePass?.name || null
+      },
+      groups: (state.generatedGroups || []).map((group, index) => ({
+        name: group.name || `Groupe ${baseIndex + index}`,
+        index: typeof group.index === 'number' ? group.index : baseIndex + index,
+        students: (group.students || []).map(sanitizeStudentForTransfer)
+      }))
+    };
+  }
+
+  function fetchSnapshotHistory(force = false) {
+    if (!google?.script?.run) return;
+    if (!state.groupType) return;
+    if (state.snapshotLoading) return;
+    if (!force && state.snapshotLoaded) return;
+
+    if (force) {
+      state.snapshotLoaded = false;
+    }
+
+    state.snapshotLoading = true;
+    updateUI();
+
+    google.script.run
+      .withSuccessHandler(result => {
+        state.snapshotLoading = false;
+        state.snapshotLoaded = true;
+        state.snapshotError = null;
+        state.snapshots = Array.isArray(result?.snapshots) ? result.snapshots : [];
+        updateUI();
+      })
+      .withFailureHandler(error => {
+        state.snapshotLoading = false;
+        state.snapshotLoaded = true;
+        state.snapshotError = error?.message || String(error);
+        updateUI();
+        showToast(`Erreur historique : ${state.snapshotError}`, 'error');
+      })
+      .listGroupSnapshots({ type: state.groupType });
+  }
+
+  function createSnapshotUI() {
+    if (!google?.script?.run) {
+      showToast('Google Apps Script non disponible', 'error');
+      return;
+    }
+
+    if (!state.generatedGroups || state.generatedGroups.length === 0) {
+      showToast('Aucun groupe à capturer', 'warning');
+      return;
+    }
+
+    const payload = buildSnapshotPayload();
+
+    showToast('📸 Création d\'un snapshot...', 'info');
+
+    google.script.run
+      .withSuccessHandler(result => {
+        if (result?.success) {
+          showToast('✅ Snapshot enregistré', 'success');
+          state.snapshotLoaded = false;
+          fetchSnapshotHistory(true);
+        } else {
+          showToast(`Erreur snapshot: ${result?.error || 'Résultat invalide'}`, 'error');
+        }
+      })
+      .withFailureHandler(error => {
+        showToast(`Erreur snapshot : ${error?.message || error}`, 'error');
+      })
+      .createGroupSnapshot(payload);
+  }
+
+  function restoreSnapshotUI(snapshotId) {
+    if (!snapshotId) return;
+
+    if (!google?.script?.run) {
+      showToast('Google Apps Script non disponible', 'error');
+      return;
+    }
+
+    showToast('♻️ Restauration du snapshot...', 'info');
+
+    google.script.run
+      .withSuccessHandler(result => {
+        if (!result || !result.success) {
+          showToast(`Erreur restauration: ${result?.error || 'Résultat invalide'}`, 'error');
+          return;
+        }
+
+        if (result.type && state.groupType && state.groupType !== result.type) {
+          showToast('⚠️ Snapshot d\'un autre type de groupe', 'warning');
+        }
+
+        if (result.type) {
+          state.groupType = result.type;
+        }
+
+        const baseIndex = typeof result.offsetStart === 'number'
+          ? result.offsetStart
+          : typeof result.config?.offsetStart === 'number'
+            ? result.config.offsetStart
+            : (state.tempOffsetStart || 1);
+
+        const restoredGroups = (result.groups || []).map((group, index) => ({
+          name: group.name || `Groupe ${baseIndex + index}`,
+          index: typeof group.index === 'number' ? group.index : baseIndex + index,
+          students: (group.students || []).map(normalizeStudentStructure)
+        }));
+
+        state.generatedGroups = restoredGroups;
+        state.numGroups = restoredGroups.length || state.numGroups;
+        state.tempOffsetStart = baseIndex;
+        state.persistMode = result.persistMode || result.config?.persistMode || state.persistMode;
+        if (result.lastTempRange) {
+          state.lastTempRange = { ...result.lastTempRange };
+        }
+        if (result.lastFinalRange) {
+          state.lastFinalRange = { ...result.lastFinalRange };
+        }
+        if (result.lastFinalizedAt) {
+          state.lastFinalizedAt = result.lastFinalizedAt;
+        }
+        state.lastTempSavedAt = result.lastTempUpdated || result.timestamp || state.lastTempSavedAt;
+
+        const restoredClasses = result.metadata?.selectedClasses;
+        if (Array.isArray(restoredClasses)) {
+          state.selectedClasses = restoredClasses;
+        } else if (typeof restoredClasses === 'string') {
+          state.selectedClasses = restoredClasses.split(',').map(c => c.trim()).filter(Boolean);
+        }
+
+        if (result.metadata?.distributionType) {
+          state.distributionType = result.metadata.distributionType;
+        }
+        if (result.metadata?.language) {
+          state.selectedLanguage = result.metadata.language;
+        }
+        if (result.metadata?.subject) {
+          state.selectedSubject = result.metadata.subject;
+        }
+
+        state.lastGeneration = result.timestamp || new Date().toISOString();
+        state.snapshotError = null;
+        state.snapshotLoaded = true;
+        state.snapshotLoading = false;
+
+        syncActivePassFromState();
+
+        updateUI();
+        showToast('✅ Snapshot restauré', 'success');
+      })
+      .withFailureHandler(error => {
+        showToast(`Erreur restauration : ${error?.message || error}`, 'error');
+      })
+      .restoreFromSnapshot({ snapshotId });
+  }
+
   function finalizeTempGroupsUI() {
     if (!google?.script?.run) {
       showToast('Google Apps Script non disponible', 'error');
@@ -3388,6 +3952,16 @@
     const modeLabel = finalizeMode === 'merge' ? 'en fusionnant' : 'en remplaçant les anciens';
     showToast(`🎯 Finalisation de ${typeName} ${modeLabel}...`, 'info');
 
+    const finalizePayload = {
+      type: state.groupType,
+      persistMode: state.persistMode,
+      offsetStart: state.tempOffsetStart,
+      tempRange: state.lastTempRange,
+      passId: getActivePass()?.id || null,
+      passName: getActivePass()?.name || null,
+      config: buildSnapshotPayload().config
+    };
+
     google.script.run
       .withSuccessHandler((result) => {
         if (result.success) {
@@ -3403,6 +3977,13 @@
           }
 
           console.log('[GroupsModule] Finalisation réussie:', result);
+          state.lastFinalRange = result.lastFinalRange ? { ...result.lastFinalRange } : { start: null, end: null };
+          state.lastFinalizedAt = result.finalizedAt || new Date().toISOString();
+          state.lastTempRange = { start: null, end: null };
+          state.lastTempSavedAt = null;
+          syncActivePassFromState();
+          fetchContinuationStatus();
+          updateUI();
         } else {
           showToast(`Erreur: ${result.error}`, 'error');
         }
@@ -3410,7 +3991,7 @@
       .withFailureHandler(error => {
         showToast(`Erreur de finalisation : ${error?.message || error}`, 'error');
       })
-      .finalizeTempGroups(state.groupType, finalizeMode, state.activeGroupingId || 'default'); // 🆕 Pass groupingId
+      .finalizeTempGroups(finalizePayload);
   }
 
   function loadTempGroupsUI() {
@@ -3423,33 +4004,41 @@
     showToast('Vérification des groupes temporaires...', 'info');
 
     google.script.run
-      .withSuccessHandler((listResult) => {
-        if (listResult.success && listResult.count > 0) {
-          var tempInfo = 'Groupes TEMP existants: ' +
-            listResult.minNumber + ' à ' + listResult.maxNumber +
-            ' (' + listResult.count + ' groupes, ' + listResult.totalStudents + ' élèves)';
-          console.log(tempInfo);
-
-          // Maintenant charger les groupes
-          showToast('📥 Chargement des groupes temporaires...', 'info');
-
-          google.script.run
-            .withSuccessHandler((result) => {
-              if (result.success && result.groups && result.groups.length > 0) {
-                state.generatedGroups = result.groups;
-                state.currentStep = 5;
-                updateUI();
-                var totalStudents = result.groups.reduce((sum, g) => sum + (g.students ? g.students.length : 0), 0);
-                showToast('✅ ' + result.totalGroups + ' groupes chargés (' + totalStudents + ' élèves)', 'success');
-                console.log('[GroupsModule] Groupes chargés:', state.generatedGroups);
-              } else {
-                showToast('Impossible de charger les groupes temporaires', 'warning');
-              }
-            })
-            .withFailureHandler(error => {
-              showToast('Erreur de chargement : ' + (error?.message || error), 'error');
-            })
-            .loadTempGroups(state.groupType);
+      .withSuccessHandler((result) => {
+          if (result.success && result.groups && result.groups.length > 0) {
+            // Charger les groupes depuis Google Sheets
+            state.generatedGroups = result.groups.map((group, index) => ({
+              name: group.name || `Groupe ${(result.offsetStart || 1) + index}`,
+              index: typeof group.index === 'number' ? group.index : (result.offsetStart || 1) + index,
+              students: (group.students || []).map(normalizeStudentStructure)
+            }));
+            state.numGroups = state.generatedGroups.length;
+            if (typeof result.offsetStart === 'number') {
+              state.tempOffsetStart = result.offsetStart;
+            }
+          if (result.persistMode) {
+            state.persistMode = result.persistMode;
+          }
+          if (result.createdRange) {
+            state.lastTempRange = { ...result.createdRange };
+          } else if (typeof result.offsetStart === 'number' && typeof result.offsetEnd === 'number' && result.totalGroups > 0) {
+            state.lastTempRange = { start: result.offsetStart, end: result.offsetEnd };
+          } else {
+            state.lastTempRange = { start: null, end: null };
+          }
+          if (result.lastFinalRange) {
+            state.lastFinalRange = { ...result.lastFinalRange };
+          }
+          if (result.lastFinalizedAt) {
+            state.lastFinalizedAt = result.lastFinalizedAt;
+          }
+          state.lastTempSavedAt = result.lastTempUpdated || new Date().toISOString();
+          state.currentStep = 5; // Aller à l'aperçu
+          syncActivePassFromState();
+          fetchContinuationStatus();
+          updateUI();
+          showToast(`✅ ${result.totalGroups} groupes chargés (${result.groups.reduce((sum, g) => sum + g.count, 0)} élèves)`, 'success');
+          console.log('[GroupsModule] Groupes chargés:', state.generatedGroups);
         } else {
           showToast('Aucun groupe temporaire trouvé pour le type: ' + state.groupType, 'warning');
         }
@@ -3772,8 +4361,41 @@
   }
 
   function exportToPDF() {
-    showToast('Export PDF en développement', 'info');
-    // TODO: Implémenter export PDF
+    if (!state.generatedGroups || state.generatedGroups.length === 0) {
+      showToast('Aucun groupe à exporter', 'warning');
+      return;
+    }
+
+    if (!google?.script?.run) {
+      showToast('Google Apps Script non disponible', 'error');
+      return;
+    }
+
+    const payload = buildSnapshotPayload();
+    payload.config = {
+      ...payload.config,
+      groupTypeLabel: GROUP_TYPES[state.groupType]?.title || state.groupType
+    };
+
+    showToast('📄 Génération du PDF...', 'info');
+
+    google.script.run
+      .withSuccessHandler((result) => {
+        if (result && result.success && result.data) {
+          const downloaded = downloadBase64File(result.data, result.fileName || 'groupes.pdf', result.mimeType || 'application/pdf');
+          if (downloaded) {
+            showToast('✅ PDF généré et téléchargé', 'success');
+          } else {
+            showToast('Erreur lors du téléchargement du PDF', 'error');
+          }
+        } else {
+          showToast(`Erreur export PDF: ${result?.error || 'Résultat invalide'}`, 'error');
+        }
+      })
+      .withFailureHandler(error => {
+        showToast(`Erreur export PDF : ${error?.message || error}`, 'error');
+      })
+      .exportGroupsToPDF(payload);
   }
 
   function exportToCSV() {
@@ -3825,8 +4447,14 @@
         to { transform: translateX(0); opacity: 1; }
       }
 
+      @keyframes spin-fast {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+      }
+
       .animate-fade-in { animation: fade-in 0.2s ease; }
       .animate-slide-in { animation: slide-in 0.3s ease; }
+      .animate-spin { animation: spin-fast 0.8s linear infinite; }
 
       /* STEPPER */
       .stepper-step {
@@ -4328,6 +4956,190 @@
         transform: rotate(3deg);
       }
 
+      /* PASS CARDS */
+      .pass-card {
+        border: 1px solid #e2e8f0;
+        border-radius: 1rem;
+        background: #ffffff;
+        padding: 1rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
+      }
+
+      .pass-card.active {
+        border-color: #6366f1;
+        box-shadow: 0 10px 30px -20px rgba(79, 70, 229, 0.7);
+      }
+
+      .pass-card__header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+      }
+
+      .pass-badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 2rem;
+        height: 2rem;
+        border-radius: 0.75rem;
+        background: #eef2ff;
+        color: #4f46e5;
+        font-weight: 700;
+        font-size: 0.875rem;
+      }
+
+      .pass-title {
+        font-size: 1rem;
+        font-weight: 700;
+        color: #1e293b;
+      }
+
+      .pass-meta {
+        font-size: 0.75rem;
+        color: #64748b;
+      }
+
+      .pass-card__body {
+        font-size: 0.875rem;
+        color: #475569;
+      }
+
+      .pass-chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.25rem 0.75rem;
+        background: #f1f5f9;
+        color: #334155;
+        border-radius: 9999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+      }
+
+      .meta-chip-group {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+      }
+
+      .meta-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.35rem 0.85rem;
+        border-radius: 9999px;
+        background: #eef2ff;
+        color: #312e81;
+        font-size: 0.7rem;
+        font-weight: 600;
+        border: 1px solid rgba(99, 102, 241, 0.25);
+      }
+
+      .meta-chip i {
+        font-size: 0.7rem;
+      }
+
+      .meta-chip__hint {
+        margin-left: 0.25rem;
+        color: #4338ca;
+        font-weight: 500;
+      }
+
+      .pass-summary {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.75rem;
+      }
+
+      .pass-summary .summary-label {
+        font-size: 0.65rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        color: #94a3b8;
+        letter-spacing: 0.05em;
+      }
+
+      .pass-summary .summary-value {
+        font-size: 0.9rem;
+        font-weight: 700;
+        color: #1e293b;
+      }
+
+      .summary-hint {
+        display: block;
+        font-size: 0.65rem;
+        color: #64748b;
+        font-weight: 500;
+        margin-top: 0.15rem;
+      }
+
+      .pass-card__footer {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+      }
+
+      .pass-action {
+        padding: 0.4rem 0.85rem;
+        border-radius: 0.75rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+        border: 1px solid #e2e8f0;
+        background: #f8fafc;
+        color: #334155;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        cursor: pointer;
+        transition: all 0.2s ease;
+      }
+
+      .pass-action:hover {
+        border-color: #6366f1;
+        color: #4338ca;
+        box-shadow: 0 8px 20px -18px rgba(79, 70, 229, 0.9);
+      }
+
+      .pass-action.primary {
+        background: linear-gradient(135deg, #6366f1, #8b5cf6);
+        color: white;
+        border-color: transparent;
+      }
+
+      .pass-action.danger {
+        background: #fee2e2;
+        color: #b91c1c;
+        border-color: #fecaca;
+      }
+
+      .class-assignment {
+        position: absolute;
+        top: 0.4rem;
+        right: 0.5rem;
+        font-size: 0.65rem;
+        font-weight: 600;
+        color: #4f46e5;
+        background: rgba(99, 102, 241, 0.08);
+        padding: 0.15rem 0.5rem;
+        border-radius: 9999px;
+      }
+
+      .class-checkbox-card {
+        position: relative;
+      }
+
+      .empty-pass-card {
+        text-align: center;
+        padding: 2rem 1.5rem;
+        border: 1px dashed #cbd5f5;
+        border-radius: 1rem;
+        background: #f8fafc;
+      }
+
       /* ACTION BUTTONS */
       .action-btn {
         display: inline-flex;
@@ -4355,6 +5167,15 @@
         border-top-color: #6366f1;
         border-radius: 50%;
         animation: spin 1s linear infinite;
+      }
+
+      .spinner-small {
+        width: 1.5rem;
+        height: 1.5rem;
+        border: 3px solid #cbd5f5;
+        border-top-color: #4f46e5;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
       }
 
       @keyframes spin {
@@ -4393,7 +5214,10 @@
     // Fonctions publiques pour la gestion des groupes temporaires
     saveTempGroupsUI,
     loadTempGroupsUI,
-    finalizeTempGroupsUI
+    finalizeTempGroupsUI,
+    createSnapshotUI,
+    restoreSnapshotUI,
+    fetchSnapshotHistory
   };
 
   // Injecter les styles
