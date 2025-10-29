@@ -133,7 +133,12 @@
     sortables: [],
 
     // Statistiques
-    showStatistics: true
+    showStatistics: true,
+
+    // UI Optimisations (étape 5)
+    headerCollapsed: false,         // Header/stepper repliable
+    actionsCollapsed: false,        // Barre d'actions compacte
+    statisticsCollapsed: false      // Panneau stats collapsible
   };
 
   // ═══════════════════════════════════════════════════════════════
@@ -435,35 +440,65 @@
     panel.className = 'bg-white rounded-3xl shadow-2xl w-full max-w-[95vw] max-h-[95vh] overflow-hidden flex flex-col';
 
     panel.innerHTML = `
-      <header class="px-8 pt-8 pb-6 border-b border-slate-200 bg-gradient-to-br from-indigo-50 via-white to-purple-50">
-        <div class="flex items-start justify-between gap-6 mb-6">
-          <div class="flex items-center gap-4">
-            <div class="h-14 w-14 rounded-2xl bg-gradient-to-br ${state.groupType ? GROUP_TYPES[state.groupType].color : 'from-slate-400 to-slate-600'} flex items-center justify-center text-3xl shadow-lg">
-              ${state.groupType ? GROUP_TYPES[state.groupType].icon : '✨'}
+      <header class="${state.currentStep === 5 && state.headerCollapsed ? 'px-4 py-2' : 'px-8 pt-8 pb-6'} border-b border-slate-200 bg-gradient-to-br from-indigo-50 via-white to-purple-50 transition-all duration-300" data-modal-header>
+        ${state.currentStep === 5 && state.headerCollapsed ? `
+          <!-- Mode compact étape 5 -->
+          <div class="flex items-center justify-between gap-4">
+            <div class="flex items-center gap-3">
+              <div class="h-8 w-8 rounded-lg bg-gradient-to-br ${state.groupType ? GROUP_TYPES[state.groupType].color : 'from-slate-400 to-slate-600'} flex items-center justify-center text-lg shadow">
+                ${state.groupType ? GROUP_TYPES[state.groupType].icon : '✨'}
+              </div>
+              <div>
+                <h2 class="text-sm font-bold text-slate-900">Groupes générés</h2>
+              </div>
             </div>
-            <div>
-              <h2 class="text-2xl font-bold text-slate-900">Création de Groupes</h2>
-              <p class="text-sm text-slate-600 mt-1">
-                ${state.groupType ? GROUP_TYPES[state.groupType].title : 'Assistant intelligent de création de groupes'}
-              </p>
+            <div class="flex items-center gap-2">
+              <button type="button" class="px-3 py-1.5 rounded-lg bg-white/80 hover:bg-white border border-slate-200 text-slate-600 text-xs font-semibold transition-colors" data-action="toggle-header" title="Développer l'en-tête">
+                <i class="fas fa-chevron-down"></i>
+              </button>
+              <button type="button" class="text-slate-400 hover:text-slate-600 transition-colors p-1" data-action="close">
+                <i class="fas fa-times text-lg"></i>
+              </button>
             </div>
           </div>
-          <button type="button" class="text-slate-400 hover:text-slate-600 transition-colors p-2" data-action="close">
-            <i class="fas fa-times text-2xl"></i>
-          </button>
-        </div>
-
-        <nav class="flex items-center gap-2" data-stepper>
-          ${[1, 2, 3, 4, 5].map(step => `
-            <div class="flex items-center gap-2 flex-1">
-              <div class="stepper-step ${step <= state.currentStep ? 'active' : ''} ${step === state.currentStep ? 'current' : ''}" data-step="${step}">
-                <span class="step-number">${step}</span>
-                <span class="step-label">${getStepLabel(step)}</span>
+        ` : `
+          <!-- Mode normal -->
+          <div class="flex items-start justify-between gap-6 mb-6">
+            <div class="flex items-center gap-4">
+              <div class="h-14 w-14 rounded-2xl bg-gradient-to-br ${state.groupType ? GROUP_TYPES[state.groupType].color : 'from-slate-400 to-slate-600'} flex items-center justify-center text-3xl shadow-lg">
+                ${state.groupType ? GROUP_TYPES[state.groupType].icon : '✨'}
               </div>
-              ${step < 5 ? '<div class="step-connector"></div>' : ''}
+              <div>
+                <h2 class="text-2xl font-bold text-slate-900">Création de Groupes</h2>
+                <p class="text-sm text-slate-600 mt-1">
+                  ${state.groupType ? GROUP_TYPES[state.groupType].title : 'Assistant intelligent de création de groupes'}
+                </p>
+              </div>
             </div>
-          `).join('')}
-        </nav>
+            <div class="flex items-center gap-2">
+              ${state.currentStep === 5 ? `
+                <button type="button" class="px-3 py-1.5 rounded-lg bg-white/80 hover:bg-white border border-slate-200 text-slate-600 text-xs font-semibold transition-colors" data-action="toggle-header" title="Réduire l'en-tête">
+                  <i class="fas fa-chevron-up"></i>
+                </button>
+              ` : ''}
+              <button type="button" class="text-slate-400 hover:text-slate-600 transition-colors p-2" data-action="close">
+                <i class="fas fa-times text-2xl"></i>
+              </button>
+            </div>
+          </div>
+
+          <nav class="flex items-center gap-2" data-stepper>
+            ${[1, 2, 3, 4, 5].map(step => `
+              <div class="flex items-center gap-2 flex-1">
+                <div class="stepper-step ${step <= state.currentStep ? 'active' : ''} ${step === state.currentStep ? 'current' : ''}" data-step="${step}">
+                  <span class="step-number">${step}</span>
+                  <span class="step-label">${getStepLabel(step)}</span>
+                </div>
+                ${step < 5 ? '<div class="step-connector"></div>' : ''}
+              </div>
+            `).join('')}
+          </nav>
+        `}
       </header>
 
       <div class="flex-1 overflow-y-auto px-8 py-8" data-step-container>
@@ -1256,22 +1291,37 @@
             </div>
             <div class="config-body">
               <div class="grid grid-cols-2 gap-3">
-                ${['ESP', 'ITA', 'ALL', 'AUTRE'].map(lang => `
-                  <label class="radio-card ${state.selectedLanguage === lang ? 'selected' : ''}">
+                ${['ESP', 'ITA', 'ALL', 'AUTRE'].map(lang => {
+                  const langInfo = state.availableLanguages.find(l => l.lang === lang);
+                  const count = langInfo ? langInfo.count : 0;
+                  const hasStudents = count > 0;
+                  return `
+                  <label class="radio-card ${state.selectedLanguage === lang ? 'selected' : ''} ${!hasStudents ? 'opacity-50' : ''}">
                     <input
                       type="radio"
                       name="language"
                       value="${lang}"
                       ${state.selectedLanguage === lang ? 'checked' : ''}
+                      ${!hasStudents ? 'disabled' : ''}
                     >
-                    <div class="flex items-center gap-2">
-                      <span class="font-medium">${lang === 'ESP' ? 'Espagnol' : lang === 'ITA' ? 'Italien' : lang === 'ALL' ? 'Allemand' : 'Autre'}</span>
-                      ${lang === 'ESP' ? '<span class="text-xl">🇪🇸</span>' : lang === 'ITA' ? '<span class="text-xl">🇮🇹</span>' : lang === 'ALL' ? '<span class="text-xl">🇩🇪</span>' : '<span class="text-xl">🌍</span>'}
+                    <div class="flex items-center justify-between gap-2 w-full">
+                      <div class="flex items-center gap-2">
+                        <span class="font-medium">${lang === 'ESP' ? 'Espagnol' : lang === 'ITA' ? 'Italien' : lang === 'ALL' ? 'Allemand' : 'Autre'}</span>
+                        ${lang === 'ESP' ? '<span class="text-xl">🇪🇸</span>' : lang === 'ITA' ? '<span class="text-xl">🇮🇹</span>' : lang === 'ALL' ? '<span class="text-xl">🇩🇪</span>' : '<span class="text-xl">🌍</span>'}
+                      </div>
+                      ${hasStudents ? `<span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">${count}</span>` : '<span class="text-xs text-slate-400">0</span>'}
                     </div>
                     <i class="fas fa-check-circle check-icon"></i>
                   </label>
-                `).join('')}
+                `;
+                }).join('')}
               </div>
+              ${state.availableLanguages.length > 0 ? `
+                <div class="mt-3 text-xs text-slate-600 bg-slate-50 rounded-lg px-3 py-2">
+                  <i class="fas fa-users mr-1"></i>
+                  Langues détectées : ${state.availableLanguages.map(l => `<strong>${l.lang}</strong> (${l.count})`).join(', ')}
+                </div>
+              ` : ''}
             </div>
           </div>
 
@@ -1280,6 +1330,7 @@
             <div class="text-sm text-purple-900">
               <p class="font-semibold mb-1">À propos de la langue :</p>
               <p>Les élèves de la langue sélectionnée seront répartis en <strong>${state.numGroups} groupe(s)</strong>. La <strong>participation (PART)</strong> sera le critère prioritaire.</p>
+              ${state.availableLanguages.length === 0 ? '<p class="mt-2 text-purple-700"><i class="fas fa-exclamation-triangle mr-1"></i>Aucune langue LV2 détectée dans les classes sélectionnées.</p>' : ''}
             </div>
           </div>
         ` : ''}
@@ -1490,9 +1541,9 @@
         ${renderPersistenceControls(regroupement)}
         ${renderActionToolbar()}
 
-        <div class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)] items-start">
+        <div class="${state.showStatistics ? 'grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)]' : ''} items-start">
           <div>
-            <div class="grid ${state.showStatistics ? 'md:grid-cols-2 xl:grid-cols-3' : 'md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5'} gap-4" id="groups-container">
+            <div class="grid ${state.showStatistics ? 'md:grid-cols-2 xl:grid-cols-3' : 'sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6'} gap-4" id="groups-container">
               ${state.generatedGroups.map((group, index) => renderGroupCard(group, index)).join('')}
             </div>
           </div>
@@ -1589,51 +1640,98 @@
   }
 
   function renderActionToolbar() {
+    if (state.actionsCollapsed) {
+      // Mode compact : bandeau horizontal avec boutons essentiels
+      return `
+        <div class="bg-white border border-slate-200 rounded-xl px-4 py-2.5 shadow-sm">
+          <div class="flex items-center justify-between gap-3 flex-wrap">
+            <div class="flex items-center gap-2 flex-wrap">
+              <button type="button" class="action-btn-compact ${state.showStatistics ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'}" data-action="toggle-statistics" title="Statistiques">
+                <i class="fas fa-chart-bar"></i>
+              </button>
+              <button type="button" class="action-btn-compact bg-slate-100 text-slate-700" data-action="regenerate" title="Régénérer">
+                <i class="fas fa-rotate-right"></i>
+              </button>
+              <div class="h-6 w-px bg-slate-300 mx-1"></div>
+              <button type="button" class="action-btn-compact bg-slate-100 text-slate-700" data-action="load-temp-groups" title="Charger">
+                <i class="fas fa-download"></i>
+              </button>
+              <button type="button" class="action-btn-compact bg-orange-500/90 hover:bg-orange-600 text-white" data-action="save-temp-groups" title="Sauver TEMP">
+                <i class="fas fa-save"></i>
+              </button>
+              <button type="button" class="action-btn-compact bg-green-600 hover:bg-green-700 text-white" data-action="finalize-temp-groups" title="Finaliser">
+                <i class="fas fa-check-circle"></i>
+              </button>
+              <div class="h-6 w-px bg-slate-300 mx-1"></div>
+              <button type="button" class="action-btn-compact bg-slate-100 text-slate-700" data-action="export-pdf" title="Export PDF">
+                <i class="fas fa-file-pdf"></i>
+              </button>
+              <button type="button" class="action-btn-compact bg-slate-100 text-slate-700" data-action="export-csv" title="Export CSV">
+                <i class="fas fa-file-csv"></i>
+              </button>
+            </div>
+            <button type="button" class="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-semibold transition-colors" data-action="toggle-actions" title="Développer les actions">
+              <i class="fas fa-chevron-down mr-1"></i>Développer
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    // Mode normal : cartes empilées
     return `
-      <div class="grid gap-3 md:grid-cols-3">
-        <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4">
-          <p class="text-xs uppercase font-semibold text-slate-500 mb-2">Calcul & aperçu</p>
-          <div class="flex flex-wrap gap-2">
-            <button type="button" class="action-btn ${state.showStatistics ? 'bg-indigo-600 text-white' : 'bg-white border border-indigo-200 text-indigo-600'}" data-action="toggle-statistics">
-              <i class="fas fa-chart-bar"></i>
-              Statistiques
-            </button>
-            <button type="button" class="action-btn bg-white border border-slate-200 text-slate-700" data-action="regenerate">
-              <i class="fas fa-rotate-right"></i>
-              Régénérer
-            </button>
-          </div>
+      <div class="space-y-3">
+        <div class="flex items-center justify-between">
+          <h4 class="text-sm font-semibold text-slate-700">Actions rapides</h4>
+          <button type="button" class="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-semibold transition-colors" data-action="toggle-actions" title="Compacter les actions">
+            <i class="fas fa-chevron-up mr-1"></i>Réduire
+          </button>
         </div>
-
-        <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4">
-          <p class="text-xs uppercase font-semibold text-slate-500 mb-2">Sauvegardes</p>
-          <div class="flex flex-wrap gap-2">
-            <button type="button" class="action-btn bg-white border border-slate-200 text-slate-700" data-action="load-temp-groups">
-              <i class="fas fa-download"></i>
-              Charger
-            </button>
-            <button type="button" class="action-btn bg-orange-500/90 hover:bg-orange-600 text-white" data-action="save-temp-groups">
-              <i class="fas fa-save"></i>
-              Sauver TEMP
-            </button>
-            <button type="button" class="action-btn bg-green-600 hover:bg-green-700 text-white" data-action="finalize-temp-groups">
-              <i class="fas fa-check-circle"></i>
-              Finaliser
-            </button>
+        <div class="grid gap-3 md:grid-cols-3">
+          <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+            <p class="text-xs uppercase font-semibold text-slate-500 mb-2">Calcul & aperçu</p>
+            <div class="flex flex-wrap gap-2">
+              <button type="button" class="action-btn ${state.showStatistics ? 'bg-indigo-600 text-white' : 'bg-white border border-indigo-200 text-indigo-600'}" data-action="toggle-statistics">
+                <i class="fas fa-chart-bar"></i>
+                Statistiques
+              </button>
+              <button type="button" class="action-btn bg-white border border-slate-200 text-slate-700" data-action="regenerate">
+                <i class="fas fa-rotate-right"></i>
+                Régénérer
+              </button>
+            </div>
           </div>
-        </div>
 
-        <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4">
-          <p class="text-xs uppercase font-semibold text-slate-500 mb-2">Exports</p>
-          <div class="flex flex-wrap gap-2">
-            <button type="button" class="action-btn bg-white border border-slate-200 text-slate-700" data-action="export-pdf">
-              <i class="fas fa-file-pdf"></i>
-              Export PDF
-            </button>
-            <button type="button" class="action-btn bg-white border border-slate-200 text-slate-700" data-action="export-csv">
-              <i class="fas fa-file-csv"></i>
-              Export CSV
-            </button>
+          <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+            <p class="text-xs uppercase font-semibold text-slate-500 mb-2">Sauvegardes</p>
+            <div class="flex flex-wrap gap-2">
+              <button type="button" class="action-btn bg-white border border-slate-200 text-slate-700" data-action="load-temp-groups">
+                <i class="fas fa-download"></i>
+                Charger
+              </button>
+              <button type="button" class="action-btn bg-orange-500/90 hover:bg-orange-600 text-white" data-action="save-temp-groups">
+                <i class="fas fa-save"></i>
+                Sauver TEMP
+              </button>
+              <button type="button" class="action-btn bg-green-600 hover:bg-green-700 text-white" data-action="finalize-temp-groups">
+                <i class="fas fa-check-circle"></i>
+                Finaliser
+              </button>
+            </div>
+          </div>
+
+          <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+            <p class="text-xs uppercase font-semibold text-slate-500 mb-2">Exports</p>
+            <div class="flex flex-wrap gap-2">
+              <button type="button" class="action-btn bg-white border border-slate-200 text-slate-700" data-action="export-pdf">
+                <i class="fas fa-file-pdf"></i>
+                Export PDF
+              </button>
+              <button type="button" class="action-btn bg-white border border-slate-200 text-slate-700" data-action="export-csv">
+                <i class="fas fa-file-csv"></i>
+                Export CSV
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -1757,17 +1855,24 @@
     return `
       <div class="statistics-panel">
         <div class="bg-white rounded-2xl border-2 border-slate-200 overflow-hidden sticky top-4">
-          <div class="bg-gradient-to-br from-indigo-600 to-purple-600 text-white p-4">
-            <h4 class="font-bold text-lg flex items-center gap-2">
-              <i class="fas fa-chart-pie"></i>
-              Distribution des scores
-            </h4>
-            <p class="text-sm opacity-90 mt-1">Analyse par groupe</p>
+          <div class="bg-gradient-to-br from-indigo-600 to-purple-600 text-white p-4 flex items-center justify-between cursor-pointer" data-action="toggle-stats-collapse">
+            <div>
+              <h4 class="font-bold text-lg flex items-center gap-2">
+                <i class="fas fa-chart-pie"></i>
+                Distribution des scores
+              </h4>
+              <p class="text-sm opacity-90 mt-1">Analyse par groupe</p>
+            </div>
+            <button type="button" class="text-white/80 hover:text-white transition-colors p-2" title="${state.statisticsCollapsed ? 'Développer' : 'Réduire'}">
+              <i class="fas fa-chevron-${state.statisticsCollapsed ? 'down' : 'up'} text-xl"></i>
+            </button>
           </div>
 
-          <div class="max-h-[calc(100vh-240px)] overflow-y-auto p-4">
-            ${state.generatedGroups.map((group, index) => renderGroupStatistics(group, index)).join('')}
-          </div>
+          ${!state.statisticsCollapsed ? `
+            <div class="max-h-[calc(100vh-240px)] overflow-y-auto p-4">
+              ${state.generatedGroups.map((group, index) => renderGroupStatistics(group, index)).join('')}
+            </div>
+          ` : ''}
         </div>
       </div>
     `;
@@ -1914,6 +2019,21 @@
     updateUI();
   }
 
+  function toggleHeaderCollapse() {
+    state.headerCollapsed = !state.headerCollapsed;
+    updateUI();
+  }
+
+  function toggleActionsCollapse() {
+    state.actionsCollapsed = !state.actionsCollapsed;
+    updateUI();
+  }
+
+  function toggleStatsCollapse() {
+    state.statisticsCollapsed = !state.statisticsCollapsed;
+    updateUI();
+  }
+
   // ═══════════════════════════════════════════════════════════════
   //  NAVIGATION & EVENT LISTENERS
   // ═══════════════════════════════════════════════════════════════
@@ -2025,6 +2145,15 @@
     if (exportPdfBtn) exportPdfBtn.onclick = exportToPDF;
     if (exportCsvBtn) exportCsvBtn.onclick = exportToCSV;
 
+    // Boutons de bascule UI (étape 5)
+    const toggleHeaderBtn = qs('[data-action="toggle-header"]', state.modal);
+    const toggleActionsBtn = qs('[data-action="toggle-actions"]', state.modal);
+    const toggleStatsCollapseBtn = qs('[data-action="toggle-stats-collapse"]', state.modal);
+
+    if (toggleHeaderBtn) toggleHeaderBtn.onclick = toggleHeaderCollapse;
+    if (toggleActionsBtn) toggleActionsBtn.onclick = toggleActionsCollapse;
+    if (toggleStatsCollapseBtn) toggleStatsCollapseBtn.onclick = toggleStatsCollapse;
+
     qsa('[data-action="set-persist-mode"]', state.modal).forEach(btn => {
       btn.onclick = () => setPersistMode(btn.dataset.value);
     });
@@ -2054,6 +2183,14 @@
       }
       nextStep();
     } else if (state.currentStep === 3) {
+      // Validation spécifique pour les groupes LV2
+      if (state.groupType === 'language') {
+        const selectedLangInfo = state.availableLanguages.find(l => l.lang === state.selectedLanguage);
+        if (!selectedLangInfo || selectedLangInfo.count === 0) {
+          showToast(`⚠️ Aucun élève trouvé pour la langue ${state.selectedLanguage}`, 'warning');
+          return;
+        }
+      }
       nextStep();
     } else if (state.currentStep === 4) {
       generateGroups();
@@ -2079,6 +2216,11 @@
       // Charger les classes si on arrive à l'étape 2
       if (state.currentStep === 2 && state.availableClasses.length === 0) {
         loadAvailableClasses();
+      }
+
+      // Détecter les langues disponibles si on arrive à l'étape 3 en mode LV2
+      if (state.currentStep === 3 && state.groupType === 'language') {
+        detectAvailableLanguages();
       }
 
       updateUI();
@@ -2508,19 +2650,71 @@
           });
         });
 
-        state.students = students;
-        state.studentsById = new Map(students.map(s => [s.id, s]));
+        // 🔴 FILTRAGE LV2 : Si on est en mode 'language', ne garder que les élèves de la langue sélectionnée
+        let filteredStudents = students;
+        if (state.groupType === 'language' && state.selectedLanguage) {
+          const beforeFilter = students.length;
+          filteredStudents = students.filter(s => {
+            const studentLV2 = (s.lv2 || '').toString().trim().toUpperCase();
+            const targetLang = state.selectedLanguage.toUpperCase();
+            return studentLV2 === targetLang;
+          });
+          console.log(`[GroupsModule] 🔍 Filtrage LV2 "${state.selectedLanguage}": ${beforeFilter} élèves → ${filteredStudents.length} élèves`);
+          
+          if (filteredStudents.length === 0) {
+            console.warn(`[GroupsModule] ⚠️ Aucun élève trouvé pour la langue "${state.selectedLanguage}"`);
+            showToast(`⚠️ Aucun élève trouvé pour la langue ${state.selectedLanguage}`, 'warning');
+          }
+        }
 
-        console.log(`[GroupsModule] 📊 Total d'élèves chargés: ${students.length}`);
-        console.log('[GroupsModule] 🔍 DEBUG - Premier élève normalisé:', state.students[0]);
+        state.students = filteredStudents;
+        state.studentsById = new Map(filteredStudents.map(s => [s.id, s]));
 
-        resolve(students);
+        console.log(`[GroupsModule] 📊 Total d'élèves chargés: ${filteredStudents.length}`);
+        if (filteredStudents.length > 0) {
+          console.log('[GroupsModule] 🔍 DEBUG - Premier élève normalisé:', state.students[0]);
+        }
+
+        resolve(filteredStudents);
       } catch (error) {
         console.error('[GroupsModule] Erreur loadStudentsFromClasses:', error);
         showToast('❌ Erreur lors du chargement des élèves', 'error');
         reject(error);
       }
     });
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  DÉTECTION DES LANGUES DISPONIBLES
+  // ═══════════════════════════════════════════════════════════════
+
+  function detectAvailableLanguages() {
+    if (!state.classesData || Object.keys(state.classesData).length === 0) {
+      state.availableLanguages = [];
+      return;
+    }
+
+    const languageCounts = {};
+    
+    // Parcourir toutes les classes sélectionnées
+    (state.selectedClasses || []).forEach(displayName => {
+      const bucket = state.classesData[displayName];
+      if (!bucket || !Array.isArray(bucket.eleves)) return;
+
+      bucket.eleves.forEach(e => {
+        if (!e) return;
+        const lv2 = (e.lv2 || e.LV2 || '').toString().trim().toUpperCase();
+        if (lv2) {
+          languageCounts[lv2] = (languageCounts[lv2] || 0) + 1;
+        }
+      });
+    });
+
+    state.availableLanguages = Object.entries(languageCounts)
+      .map(([lang, count]) => ({ lang, count }))
+      .sort((a, b) => b.count - a.count); // Tri par nombre d'élèves décroissant
+
+    console.log('[GroupsModule] 🗣️ Langues détectées:', state.availableLanguages);
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -2566,10 +2760,23 @@
       return;
     }
 
-    // 1. On trie par niveau (note haute -> élève "fort")
-    const sorted = sortByNeedScoreDesc(state.students);
-    console.log('[GroupsModule] 📊 Distribution par mode:', state.distributionType);
-    console.log('[GroupsModule] Top 3 élèves:', sorted.slice(0, 3).map(s => `${s.nom} (${getNeedScoreForStudent(s).toFixed(1)})`));
+    // 1. Tri adapté au type de groupe
+    let sorted;
+    if (state.groupType === 'language') {
+      // Pour les groupes LV2 : tri par PARTICIPATION (PART) décroissant
+      sorted = [...state.students].sort((a, b) => {
+        const partA = a.part ?? a.scores?.PART ?? 0;
+        const partB = b.part ?? b.scores?.PART ?? 0;
+        return partB - partA; // Décroissant : meilleurs participateurs en premier
+      });
+      console.log('[GroupsModule] 📊 Mode LV2 - Tri par PARTICIPATION');
+      console.log('[GroupsModule] Top 3 élèves:', sorted.slice(0, 3).map(s => `${s.nom} (PART: ${s.part ?? s.scores?.PART ?? 0})`));
+    } else {
+      // Pour les groupes de besoins : tri par niveau (note haute -> élève "fort")
+      sorted = sortByNeedScoreDesc(state.students);
+      console.log('[GroupsModule] 📊 Distribution par mode:', state.distributionType);
+      console.log('[GroupsModule] Top 3 élèves:', sorted.slice(0, 3).map(s => `${s.nom} (${getNeedScoreForStudent(s).toFixed(1)})`));
+    }
 
     // 🔴 FIX PARITÉ : Entrelacers filles et garçons pour équilibrer
     const girls = sorted.filter(s => (s.sexe || '').toUpperCase() === 'F');
@@ -3597,6 +3804,25 @@
       .action-btn:hover {
         transform: translateY(-1px);
         box-shadow: 0 4px 12px -6px rgba(0, 0, 0, 0.2);
+      }
+
+      /* ACTION BUTTONS COMPACT */
+      .action-btn-compact {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 2.25rem;
+        height: 2.25rem;
+        border-radius: 0.5rem;
+        font-size: 0.875rem;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        border: none;
+      }
+
+      .action-btn-compact:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 2px 8px -4px rgba(0, 0, 0, 0.2);
       }
 
       /* SPINNERS */
