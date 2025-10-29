@@ -116,7 +116,10 @@
     sortables: [],
 
     // Statistiques
-    showStatistics: true
+    showStatistics: true,
+
+    // 🆕 Mode de sauvegarde (pour workflow multi-phase)
+    saveMode: 'append'                  // 'replace' | 'append' (défaut append pour workflow multi-phase)
   };
 
   // ═══════════════════════════════════════════════════════════════
@@ -1031,6 +1034,18 @@
               </p>
             </div>
             <div class="flex items-center gap-3 flex-wrap justify-end">
+              <!-- Mode de sauvegarde: Remplacer ou Ajouter -->
+              <div class="flex items-center gap-2 bg-slate-100 p-2 rounded-lg">
+                <button type="button" class="action-btn ${state.saveMode === 'replace' ? 'bg-red-600 text-white' : 'bg-slate-200 text-slate-700'}" data-action="set-save-mode" data-mode="replace" title="Remplacer: supprime les groupes précédents du même type">
+                  <i class="fas fa-arrows-rotate"></i>
+                  Remplacer
+                </button>
+                <button type="button" class="action-btn ${state.saveMode === 'append' ? 'bg-green-600 text-white' : 'bg-slate-200 text-slate-700'}" data-action="set-save-mode" data-mode="append" title="Ajouter: cumule avec les groupes existants">
+                  <i class="fas fa-plus-circle"></i>
+                  Ajouter
+                </button>
+              </div>
+
               <button type="button" class="action-btn ${state.showStatistics ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'} hover:bg-indigo-700" data-action="toggle-statistics">
                 <i class="fas fa-chart-bar"></i>
                 Statistiques
@@ -1443,6 +1458,7 @@
     // Étape 5 : Actions sur les groupes
     const toggleStatsBtn = qs('[data-action="toggle-statistics"]', state.modal);
     const regenerateBtn = qs('[data-action="regenerate"]', state.modal);
+    const saveModeButtons = qsa('[data-action="set-save-mode"]', state.modal);
     const saveTempBtn = qs('[data-action="save-temp-groups"]', state.modal);
     const loadTempBtn = qs('[data-action="load-temp-groups"]', state.modal);
     const finalizeTempBtn = qs('[data-action="finalize-temp-groups"]', state.modal);
@@ -1451,6 +1467,17 @@
 
     if (toggleStatsBtn) toggleStatsBtn.onclick = toggleStatistics;
     if (regenerateBtn) regenerateBtn.onclick = generateGroups;
+
+    // Handlers pour les boutons de mode (Replace vs Append)
+    saveModeButtons.forEach(btn => {
+      btn.onclick = (e) => {
+        const mode = e.target.closest('button').getAttribute('data-mode');
+        state.saveMode = mode;
+        updateUI();
+        showToast(`Mode: ${mode === 'replace' ? 'Remplacer' : 'Ajouter'}`, 'info');
+      };
+    });
+
     if (saveTempBtn) saveTempBtn.onclick = saveTempGroupsUI;
     if (loadTempBtn) loadTempBtn.onclick = loadTempGroupsUI;
     if (finalizeTempBtn) finalizeTempBtn.onclick = finalizeTempGroupsUI;
@@ -2136,6 +2163,7 @@
 
     const payload = {
       type: state.groupType,
+      saveMode: state.saveMode,  // 'replace' | 'append'
       config: {
         selectedClasses: state.selectedClasses,
         numGroups: state.numGroups,
@@ -2182,12 +2210,18 @@
 
     const typeName = typeMap[state.groupType] || state.groupType;
 
-    showToast(`🎯 Finalisation de ${typeName}...`, 'info');
+    // Déterminer le finalizeMode basé sur saveMode
+    // Si saveMode='replace' → finalize='replace' (comportement actuel)
+    // Si saveMode='append' → finalize='merge' (cumule avec existants)
+    const finalizeMode = state.saveMode === 'append' ? 'merge' : 'replace';
+
+    const modeLabel = finalizeMode === 'merge' ? 'en fusionnant' : 'en remplaçant les anciens';
+    showToast(`🎯 Finalisation de ${typeName} ${modeLabel}...`, 'info');
 
     google.script.run
       .withSuccessHandler((result) => {
         if (result.success) {
-          showToast(`✅ ${typeName} finalisés et visibles ! (${result.prefix}1, ${result.prefix}2, ...)`, 'success');
+          showToast(`✅ ${typeName} finalisés ! (${result.prefix}1, ${result.prefix}2, ...)`, 'success');
           console.log('[GroupsModule] Finalisation réussie:', result);
         } else {
           showToast(`Erreur: ${result.error}`, 'error');
@@ -2196,7 +2230,7 @@
       .withFailureHandler(error => {
         showToast(`Erreur de finalisation : ${error?.message || error}`, 'error');
       })
-      .finalizeTempGroups(state.groupType);
+      .finalizeTempGroups(state.groupType, finalizeMode);
   }
 
   function loadTempGroupsUI() {

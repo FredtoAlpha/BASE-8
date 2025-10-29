@@ -2357,20 +2357,38 @@ function saveTempGroups(payload) {
       typePrefix = 'grLv'; // langues
     }
 
-    console.log('saveTempGroups [CORRECTIF D+] - Début');
+    var saveMode = payload.saveMode || 'append'; // défaut 'append' pour workflow multi-phase
+    console.log('saveTempGroups [CORRECTIF D+ avec saveMode] - Début');
     console.log('Type:', payload.type);
     console.log('Prefix:', typePrefix);
+    console.log('SaveMode:', saveMode);
     console.log('Nombre de groupes:', payload.groups.length);
 
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var results = [];
     var totalEleves = 0;
 
-    // --- ÉTAPE 0 : Détecter le plus grand numéro existant pour NUMÉROTATION CONTINUE
-    var maxExisting = getMaxGroupNumber_(ss, typePrefix);
-    var startNum = maxExisting + 1; // Commence à partir du suivant
-    console.log('Max group number existant pour ' + typePrefix + ': ' + maxExisting);
-    console.log('Nouveaux groupes seront numérotés de ' + startNum + ' à ' + (startNum + payload.groups.length - 1));
+    // ÉTAPE PRÉALABLE : Si saveMode='replace', purger les TEMP existants
+    if (saveMode === 'replace') {
+      console.log('Mode REPLACE: suppression des TEMP existants avec préfixe ' + typePrefix);
+      var sheets = ss.getSheets();
+      for (var delIdx = 0; delIdx < sheets.length; delIdx++) {
+        var shName = sheets[delIdx].getName();
+        if (shName.startsWith(typePrefix) && shName.endsWith('TEMP')) {
+          console.log('  Suppression: ' + shName);
+          ss.deleteSheet(sheets[delIdx]);
+        }
+      }
+      // Après suppression, recommencer à 1
+      var startNum = 1;
+      console.log('Groupes seront numérotés de ' + startNum + ' à ' + payload.groups.length);
+    } else {
+      // Mode APPEND : Détecter le plus grand numéro existant pour NUMÉROTATION CONTINUE
+      var maxExisting = getMaxGroupNumber_(ss, typePrefix);
+      var startNum = maxExisting + 1; // Commence à partir du suivant
+      console.log('Mode APPEND: Max group number existant pour ' + typePrefix + ': ' + maxExisting);
+      console.log('Nouveaux groupes seront numérotés de ' + startNum + ' à ' + (startNum + payload.groups.length - 1));
+    }
 
     // Déterminer combien de nouvelles feuilles il FAUDRA créer
     var newSheetsNeeded = 0;
@@ -2693,23 +2711,41 @@ function loadTempGroups(type) {
  * Finalise les groupes temporaires en les renommant et les rendant visibles
  * Renomme grBe1TEMP → grBe1, supprime les TEMP
  */
-function finalizeTempGroups(type) {
+/**
+ * Finalise les groupes temporaires en groupes visibles (TEMP → final)
+ *
+ * @param {string} type - 'needs', 'language', ou 'options'
+ * @param {string} finalizeMode - 'replace' : supprime anciens | 'merge' : cumule avec existants
+ *
+ * MODE REPLACE: Supprime grBe1, grBe2, etc. puis renomme grBe1TEMP, grBe2TEMP (comportement actuel)
+ * MODE MERGE: Détecte le plus grand numéro final, renomme grBe*TEMP en continuant la numérotation
+ * Exemple: si grBe1, grBe2 existent, grBe1TEMP, grBe2TEMP, grBe3TEMP → grBe3, grBe4, grBe5
+ */
+function finalizeTempGroups(type, finalizeMode) {
   try {
     if (!type || !['needs', 'language', 'options'].includes(type)) {
       return { success: false, error: 'Type invalide' };
     }
 
-    let typePrefix = 'grOp';
+    var typePrefix = 'grOp';
     if (type === 'needs') typePrefix = 'grBe';
     else if (type === 'language') typePrefix = 'grLv';
 
-    console.log('✅ finalizeTempGroups pour type: ' + type + ' (prefix: ' + typePrefix + ')');
+    finalizeMode = finalizeMode || 'replace'; // défaut 'replace' pour compatibilité
+    console.log('finalizeTempGroups - Mode: ' + finalizeMode + ' | Type: ' + type + ' | Prefix: ' + typePrefix);
 
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const sheets = ss.getSheets();
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheets = ss.getSheets();
 
     // Trouver tous les onglets TEMP pour ce prefix
-    const tempSheets = sheets.filter(sh => sh.getName().startsWith(typePrefix) && sh.getName().endsWith('TEMP'));
+    var tempSheets = [];
+    for (var i = 0; i < sheets.length; i++) {
+      var sh = sheets[i];
+      var name = sh.getName();
+      if (name.startsWith(typePrefix) && name.endsWith('TEMP')) {
+        tempSheets.push(sh);
+      }
+    }
 
     if (tempSheets.length === 0) {
       return { success: false, error: 'Aucun groupe temporaire trouvé pour ' + typePrefix };
@@ -2717,38 +2753,74 @@ function finalizeTempGroups(type) {
 
     console.log('   Finalisation de ' + tempSheets.length + ' groupes...');
 
-    // D'abord, supprimer les anciens groupes finalisés du même type
-    const finalSheets = sheets.filter(sh => {
-      const name = sh.getName();
-      return name.startsWith(typePrefix) && !name.endsWith('TEMP') && /^\w+\d+$/.test(name);
-    });
+    if (finalizeMode === 'replace') {
+      // MODE REPLACE : Supprimer les anciens groupes finalisés du même type
+      console.log('   Mode REPLACE: suppression des anciens groupes finalisés');
+      var finalSheets = [];
+      for (var j = 0; j < sheets.length; j++) {
+        var sh = sheets[j];
+        var name = sh.getName();
+        if (name.startsWith(typePrefix) && !name.endsWith('TEMP')) {
+          finalSheets.push(sh);
+        }
+      }
 
-    finalSheets.forEach(sh => {
-      console.log('   🗑️ Suppression de l\'ancien:', sh.getName());
-      ss.deleteSheet(sh);
-    });
+      for (var k = 0; k < finalSheets.length; k++) {
+        console.log('   Suppression de l\'ancien: ' + finalSheets[k].getName());
+        ss.deleteSheet(finalSheets[k]);
+      }
 
-    // Renommer les TEMP en final + afficher
-    tempSheets.forEach(sh => {
-      const tempName = sh.getName();
-      const finalName = tempName.replace('TEMP', ''); // grBe1TEMP → grBe1
+      // Renommer les TEMP en final (1, 2, 3...)
+      for (var m = 0; m < tempSheets.length; m++) {
+        var tempName = tempSheets[m].getName();
+        var finalName = tempName.replace('TEMP', ''); // grBe1TEMP → grBe1
+        console.log('   Renommage: ' + tempName + ' → ' + finalName);
+        tempSheets[m].setName(finalName);
+        tempSheets[m].showSheet();
+      }
 
-      console.log('   📝 Renommage: ' + tempName + ' → ' + finalName);
-      sh.setName(finalName);
-      sh.showSheet();
-    });
+    } else if (finalizeMode === 'merge') {
+      // MODE MERGE : Trouver le plus grand numéro final existant et continuer la numérotation
+      console.log('   Mode MERGE: préservation des anciens + numérotation continue');
+      var maxFinalNum = 0;
+      for (var n = 0; n < sheets.length; n++) {
+        var sh = sheets[n];
+        var name = sh.getName();
+        if (name.startsWith(typePrefix) && !name.endsWith('TEMP')) {
+          // Extraire le numéro de "grBe3"
+          var match = name.match(/^[a-zA-Z]+(\d+)$/);
+          if (match) {
+            var num = parseInt(match[1], 10);
+            if (num > maxFinalNum) maxFinalNum = num;
+          }
+        }
+      }
 
-    console.log('✅ finalizeTempGroups terminé - Groupes rendus visibles');
+      var nextNum = maxFinalNum + 1;
+      console.log('   Max final number trouvé: ' + maxFinalNum + ', nextNum: ' + nextNum);
+
+      // Renommer les TEMP en continuant la numérotation
+      for (var p = 0; p < tempSheets.length; p++) {
+        var tempName = tempSheets[p].getName();
+        var finalName = typePrefix + (nextNum + p); // grBe3, grBe4, grBe5...
+        console.log('   Renommage: ' + tempName + ' → ' + finalName);
+        tempSheets[p].setName(finalName);
+        tempSheets[p].showSheet();
+      }
+    }
+
+    console.log('finalizeTempGroups terminé - Groupes rendus visibles');
 
     return {
       success: true,
-      message: 'Groupes finalisés et rendus visibles',
+      message: 'Groupes finalisés (' + finalizeMode + ' mode)',
       type: type,
       prefix: typePrefix,
+      finalizeMode: finalizeMode,
       count: tempSheets.length
     };
   } catch (e) {
-    console.error('❌ Erreur finalizeTempGroups:', e.toString());
+    console.error('Erreur finalizeTempGroups:', e.toString());
     return { success: false, error: e.toString() };
   }
 }
