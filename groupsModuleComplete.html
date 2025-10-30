@@ -136,9 +136,12 @@
     showStatistics: true,
 
     // UI Optimisations (étape 5)
-    headerCollapsed: false,         // Header/stepper repliable
+    headerHidden: false,            // Header complètement masqué (titre + stepper)
     actionsCollapsed: false,        // Barre d'actions compacte
-    statisticsCollapsed: false      // Panneau stats collapsible
+    statisticsCollapsed: false,     // Panneau stats collapsible
+    focusMode: false,               // Mode focus groupes (masque aussi contrôles)
+    headerHiddenPreference: false,  // Persiste préférence header entre phases
+    keyboardShortcutsEnabled: true  // Raccourcis clavier (H, F, S)
   };
 
   // ═══════════════════════════════════════════════════════════════
@@ -437,32 +440,23 @@
     overlay.dataset.groupsModal = 'complete';
 
     const panel = documentRef.createElement('div');
-    panel.className = 'bg-white rounded-3xl shadow-2xl w-full max-w-[95vw] max-h-[95vh] overflow-hidden flex flex-col';
+    panel.className = 'bg-white rounded-3xl shadow-2xl w-full max-w-[95vw] max-h-[95vh] overflow-hidden flex flex-col relative';
 
     panel.innerHTML = `
-      <header class="${state.currentStep === 5 && state.headerCollapsed ? 'px-4 py-2' : 'px-8 pt-8 pb-6'} border-b border-slate-200 bg-gradient-to-br from-indigo-50 via-white to-purple-50 transition-all duration-300" data-modal-header>
-        ${state.currentStep === 5 && state.headerCollapsed ? `
-          <!-- Mode compact étape 5 -->
-          <div class="flex items-center justify-between gap-4">
-            <div class="flex items-center gap-3">
-              <div class="h-8 w-8 rounded-lg bg-gradient-to-br ${state.groupType ? GROUP_TYPES[state.groupType].color : 'from-slate-400 to-slate-600'} flex items-center justify-center text-lg shadow">
-                ${state.groupType ? GROUP_TYPES[state.groupType].icon : '✨'}
-              </div>
-              <div>
-                <h2 class="text-sm font-bold text-slate-900">Groupes générés</h2>
-              </div>
-            </div>
-            <div class="flex items-center gap-2">
-              <button type="button" class="px-3 py-1.5 rounded-lg bg-white/80 hover:bg-white border border-slate-200 text-slate-600 text-xs font-semibold transition-colors" data-action="toggle-header" title="Développer l'en-tête">
-                <i class="fas fa-chevron-down"></i>
-              </button>
-              <button type="button" class="text-slate-400 hover:text-slate-600 transition-colors p-1" data-action="close">
-                <i class="fas fa-times text-lg"></i>
-              </button>
-            </div>
-          </div>
-        ` : `
-          <!-- Mode normal -->
+      ${state.currentStep === 5 && state.headerHidden ? `
+        <!-- Bouton flottant pour réafficher le header - AMÉLIORÉ -->
+        <div class="fixed top-4 right-4 z-[100] animate-slide-in-down">
+          <button type="button"
+            class="px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-700 hover:to-indigo-800 text-white text-sm font-semibold shadow-2xl transition-all duration-200 flex items-center gap-2 hover:shadow-2xl hover:scale-105"
+            data-action="toggle-header-visibility"
+            title="Afficher l'en-tête (Raccourci: H)">
+            <i class="fas fa-angles-down"></i>
+            <span>En-tête</span>
+          </button>
+        </div>
+      ` : ''}
+      <header class="${state.currentStep === 5 && state.headerHidden ? 'hidden' : 'px-8 pt-8 pb-6'} border-b border-slate-200 bg-gradient-to-br from-indigo-50 via-white to-purple-50 transition-all duration-300" data-modal-header>
+        <!-- Mode normal -->
           <div class="flex items-start justify-between gap-6 mb-6">
             <div class="flex items-center gap-4">
               <div class="h-14 w-14 rounded-2xl bg-gradient-to-br ${state.groupType ? GROUP_TYPES[state.groupType].color : 'from-slate-400 to-slate-600'} flex items-center justify-center text-3xl shadow-lg">
@@ -477,28 +471,31 @@
             </div>
             <div class="flex items-center gap-2">
               ${state.currentStep === 5 ? `
-                <button type="button" class="px-3 py-1.5 rounded-lg bg-white/80 hover:bg-white border border-slate-200 text-slate-600 text-xs font-semibold transition-colors" data-action="toggle-header" title="Réduire l'en-tête">
-                  <i class="fas fa-chevron-up"></i>
+                <button type="button"
+                  class="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 text-sm font-semibold transition-all duration-200 hover:shadow-md flex items-center gap-2"
+                  data-action="toggle-header-visibility"
+                  title="Masquer l'en-tête pour plus d'espace (Raccourci: H)">
+                  <i class="fas fa-angles-up"></i>
+                  <span>Masquer</span>
                 </button>
               ` : ''}
-              <button type="button" class="text-slate-400 hover:text-slate-600 transition-colors p-2" data-action="close">
+              <button type="button" class="text-slate-400 hover:text-slate-600 transition-colors p-2 hover:bg-slate-100 rounded-lg" data-action="close">
                 <i class="fas fa-times text-2xl"></i>
               </button>
             </div>
           </div>
 
-          <nav class="flex items-center gap-2" data-stepper>
-            ${[1, 2, 3, 4, 5].map(step => `
-              <div class="flex items-center gap-2 flex-1">
-                <div class="stepper-step ${step <= state.currentStep ? 'active' : ''} ${step === state.currentStep ? 'current' : ''}" data-step="${step}">
-                  <span class="step-number">${step}</span>
-                  <span class="step-label">${getStepLabel(step)}</span>
-                </div>
-                ${step < 5 ? '<div class="step-connector"></div>' : ''}
+        <nav class="flex items-center gap-2" data-stepper>
+          ${[1, 2, 3, 4, 5].map(step => `
+            <div class="flex items-center gap-2 flex-1">
+              <div class="stepper-step ${step <= state.currentStep ? 'active' : ''} ${step === state.currentStep ? 'current' : ''}" data-step="${step}">
+                <span class="step-number">${step}</span>
+                <span class="step-label">${getStepLabel(step)}</span>
               </div>
-            `).join('')}
-          </nav>
-        `}
+              ${step < 5 ? '<div class="step-connector"></div>' : ''}
+            </div>
+          `).join('')}
+        </nav>
       </header>
 
       <div class="flex-1 overflow-y-auto px-8 py-8" data-step-container>
@@ -1046,6 +1043,8 @@
       state.persistMode = 'replace';
       state.tempOffsetStart = 1;
       state.generatedGroups = [];
+      state.students = [];
+      state.studentsById = new Map();
       return;
     }
 
@@ -1060,8 +1059,19 @@
         ...group,
         students: group.students.map(student => ({ ...student }))
       }));
+      // Récupérer les élèves du regroupement sauvegardé
+      const allStudentsInGroups = [];
+      stored.groups.forEach(group => {
+        if (Array.isArray(group.students)) {
+          allStudentsInGroups.push(...group.students);
+        }
+      });
+      state.students = allStudentsInGroups;
+      state.studentsById = new Map(allStudentsInGroups.map(s => [s.id, s]));
     } else {
       state.generatedGroups = [];
+      state.students = [];
+      state.studentsById = new Map();
     }
 
     applyOffsetToGeneratedGroups();
@@ -1348,13 +1358,73 @@
 
   function renderStep4_Preview() {
     const config = getConfigSummary();
+    const stats = calculateStep4Stats();
+    const warnings = getStep4Warnings(stats);
+    const recommendation = getAlgoRecommendation(stats);
 
     return `
       <div class="max-w-4xl mx-auto">
         <div class="text-center mb-8">
-          <h3 class="text-2xl font-bold text-slate-900 mb-3">Récapitulatif de la configuration</h3>
-          <p class="text-slate-600">Vérifiez les paramètres avant de générer les groupes</p>
+          <h3 class="text-2xl font-bold text-slate-900 mb-3">Vérification avant génération</h3>
+          <p class="text-slate-600">Vérifiez la configuration et les statistiques pré-génération</p>
         </div>
+
+        <!-- STATISTIQUES GLOBALES -->
+        <div class="grid md:grid-cols-4 gap-4 mb-8">
+          <div class="bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-200 rounded-xl p-4">
+            <p class="text-xs uppercase font-semibold text-blue-700 mb-2">Total élèves</p>
+            <p class="text-2xl font-bold text-blue-900">${stats.totalStudents}</p>
+          </div>
+          <div class="bg-gradient-to-br from-purple-50 to-pink-50 border border-purple-200 rounded-xl p-4">
+            <p class="text-xs uppercase font-semibold text-purple-700 mb-2">Total groupes</p>
+            <p class="text-2xl font-bold text-purple-900">${stats.totalGroups}</p>
+          </div>
+          <div class="bg-gradient-to-br from-emerald-50 to-teal-50 border border-emerald-200 rounded-xl p-4">
+            <p class="text-xs uppercase font-semibold text-emerald-700 mb-2">Taille/groupe</p>
+            <p class="text-2xl font-bold text-emerald-900">~${stats.avgGroupSize}</p>
+          </div>
+          <div class="bg-gradient-to-br from-amber-50 to-orange-50 border border-amber-200 rounded-xl p-4">
+            <p class="text-xs uppercase font-semibold text-amber-700 mb-2">Temps estimé</p>
+            <p class="text-2xl font-bold text-amber-900">${stats.estimatedTime}</p>
+          </div>
+        </div>
+
+        ${warnings.length > 0 ? `
+          <!-- WARNINGS -->
+          <div class="mb-8 bg-amber-50 border border-amber-200 rounded-xl p-4">
+            <h4 class="font-semibold text-amber-900 mb-3 flex items-center gap-2">
+              <i class="fas fa-triangle-exclamation"></i>
+              Vérifications
+            </h4>
+            <div class="space-y-2">
+              ${warnings.map(w => `
+                <div class="flex items-start gap-2 text-sm text-amber-900">
+                  <i class="fas fa-exclamation-circle mt-0.5 flex-shrink-0"></i>
+                  <span>${w}</span>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        ` : `
+          <!-- OK -->
+          <div class="mb-8 bg-green-50 border border-green-200 rounded-xl p-4">
+            <div class="flex items-center gap-2 text-green-900 font-semibold">
+              <i class="fas fa-check-circle"></i>
+              Configuration validée ✓
+            </div>
+          </div>
+        `}
+
+        ${recommendation ? `
+          <!-- RECOMMANDATION ALGO -->
+          <div class="mb-8 bg-blue-50 border border-blue-200 rounded-xl p-4">
+            <h4 class="font-semibold text-blue-900 mb-2 flex items-center gap-2">
+              <i class="fas fa-lightbulb"></i>
+              Recommandation
+            </h4>
+            <p class="text-sm text-blue-800">${recommendation}</p>
+          </div>
+        ` : ''}
 
         <div class="grid md:grid-cols-2 gap-6 mb-8">
           <div class="summary-card">
@@ -1488,6 +1558,63 @@
     return base;
   }
 
+  // ═══ PHASE 4 - VALIDATION & STATS ═══
+  function calculateStep4Stats() {
+    const totalStudents = state.students.length;
+    const totalGroups = state.numGroups;
+    const avgGroupSize = totalStudents > 0 ? Math.round(totalStudents / totalGroups) : 0;
+    const estimatedTime = totalStudents > 100 ? '8-12 sec' : totalStudents > 50 ? '5-8 sec' : '2-4 sec';
+
+    return {
+      totalStudents,
+      totalGroups,
+      avgGroupSize,
+      estimatedTime
+    };
+  }
+
+  function getStep4Warnings(stats) {
+    const warnings = [];
+
+    if (stats.totalStudents === 0) {
+      warnings.push('⚠️ Aucun élève détecté. Vérifiez la sélection des classes.');
+    }
+
+    if (stats.totalStudents < 10) {
+      warnings.push('⚠️ Classe très petite (< 10 élèves). Les groupes seront petit.');
+    }
+
+    if (stats.avgGroupSize < 5) {
+      warnings.push('⚠️ Groupes très petits (< 5 élèves). Considérez réduire le nombre de groupes.');
+    }
+
+    if (stats.avgGroupSize > 25) {
+      warnings.push('⚠️ Groupes très grands (> 25 élèves). Considérez augmenter le nombre de groupes.');
+    }
+
+    if (stats.totalStudents % stats.totalGroups !== 0) {
+      const remainder = stats.totalStudents % stats.totalGroups;
+      warnings.push(`ℹ️ Effectifs inégaux: ${remainder} groupe(s) aura/auront 1 élève de plus.`);
+    }
+
+    return warnings;
+  }
+
+  function getAlgoRecommendation(stats) {
+    if (state.groupType !== 'needs') return '';
+
+    // Recommandation hétéro vs homo basée sur la taille
+    if (stats.avgGroupSize < 8) {
+      return '💡 Avec des groupes si petits, la répartition hétérogène garantit un vrai mélange des niveaux.';
+    }
+
+    if (stats.avgGroupSize > 20) {
+      return '💡 Avec de grands groupes, une répartition homogène (par niveau) pourrait être intéressante pour la différenciation.';
+    }
+
+    return '💡 La distribution hétérogène est recommandée pour un vrai mélange pédagogique dans chaque groupe.';
+  }
+
   // ─────────────────────────────────────────────────────────────
   //  ÉTAPE 5 : Affichage des groupes avec Drag & Drop
   // ─────────────────────────────────────────────────────────────
@@ -1539,29 +1666,29 @@
     }
 
     return `
-      <div class="space-y-6">
-        ${renderActiveRegroupementSummary()}
-        ${renderRegroupementTabs()}
-        ${renderPersistenceControls(regroupement)}
+      <div class="space-y-6 ${state.focusMode ? 'focus-mode' : ''}">
+        ${state.focusMode ? '' : renderActiveRegroupementSummary()}
+        ${state.focusMode ? '' : renderRegroupementTabs()}
+        ${state.focusMode ? '' : renderPersistenceControls(regroupement)}
         ${renderActionToolbar()}
 
-        <div class="${state.showStatistics ? 'grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)]' : ''} items-start">
+        <div class="${state.showStatistics && !state.focusMode ? 'grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)]' : ''} items-start">
           <div>
-            <div class="grid ${state.showStatistics ? 'md:grid-cols-2 xl:grid-cols-3' : 'sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6'} gap-4" id="groups-container">
+            <div class="grid gap-4" id="groups-container" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
               ${state.generatedGroups.map((group, index) => renderGroupCard(group, index)).join('')}
             </div>
           </div>
 
-          ${state.showStatistics ? `<div class="w-full max-w-[360px]">${renderStatisticsPanel()}</div>` : ''}
+          ${state.showStatistics && !state.focusMode ? `<div class="w-full max-w-[360px]">${renderStatisticsPanel()}</div>` : ''}
         </div>
 
-        <div class="mt-6 bg-indigo-50 border border-indigo-200 rounded-xl p-4 flex items-start gap-3">
+        ${state.focusMode ? '' : `<div class="mt-6 bg-indigo-50 border border-indigo-200 rounded-xl p-4 flex items-start gap-3">
           <i class="fas fa-hand-pointer text-indigo-600 text-xl mt-0.5"></i>
           <div class="text-sm text-indigo-900">
             <p class="font-semibold mb-1">Glisser-déposer activé :</p>
             <p>Rééquilibrez vos groupes en déplaçant les élèves. Les statistiques et l'ordre sont mis à jour instantanément.</p>
           </div>
-        </div>
+        </div>`}
       </div>
     `;
   }
@@ -1644,13 +1771,32 @@
   }
 
   function renderActionToolbar() {
+    // Mode focus ultra-compact
+    if (state.focusMode) {
+      return `
+        <div class="action-toolbar bg-white border-t border-slate-200 px-3 py-2 shadow-sm flex items-center gap-1 flex-wrap overflow-x-auto">
+          <button type="button" class="action-btn-micro ${state.showStatistics ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'}" data-action="toggle-statistics" title="Stats (S)"><i class="fas fa-chart-bar"></i></button>
+          <button type="button" class="action-btn-micro bg-slate-100 text-slate-700" data-action="regenerate" title="Regen"><i class="fas fa-rotate-right"></i></button>
+          <div class="h-5 w-px bg-slate-300 mx-1"></div>
+          <button type="button" class="action-btn-micro bg-slate-100 text-slate-700" data-action="load-temp-groups" title="Load"><i class="fas fa-download"></i></button>
+          <button type="button" class="action-btn-micro bg-orange-500 hover:bg-orange-600 text-white" data-action="save-temp-groups" title="Save"><i class="fas fa-save"></i></button>
+          <button type="button" class="action-btn-micro bg-green-600 hover:bg-green-700 text-white" data-action="finalize-temp-groups" title="Final"><i class="fas fa-check"></i></button>
+          <div class="h-5 w-px bg-slate-300 mx-1"></div>
+          <button type="button" class="action-btn-micro bg-slate-100 text-slate-700" data-action="export-pdf" title="PDF"><i class="fas fa-file-pdf"></i></button>
+          <button type="button" class="action-btn-micro bg-slate-100 text-slate-700" data-action="export-csv" title="CSV"><i class="fas fa-table"></i></button>
+          <div class="flex-1"></div>
+          <button type="button" class="px-2 py-1 rounded text-xs bg-slate-100 hover:bg-slate-200 text-slate-600 font-semibold transition-colors" data-action="toggle-focus-mode" title="Normal (F)"><i class="fas fa-expand mr-1"></i></button>
+        </div>
+      `;
+    }
+
     if (state.actionsCollapsed) {
       // Mode compact : bandeau horizontal avec boutons essentiels
       return `
         <div class="bg-white border border-slate-200 rounded-xl px-4 py-2.5 shadow-sm">
           <div class="flex items-center justify-between gap-3 flex-wrap">
             <div class="flex items-center gap-2 flex-wrap">
-              <button type="button" class="action-btn-compact ${state.showStatistics ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'}" data-action="toggle-statistics" title="Statistiques">
+              <button type="button" class="action-btn-compact ${state.showStatistics ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'}" data-action="toggle-statistics" title="Statistiques (S)">
                 <i class="fas fa-chart-bar"></i>
               </button>
               <button type="button" class="action-btn-compact bg-slate-100 text-slate-700" data-action="regenerate" title="Régénérer">
@@ -1672,6 +1818,10 @@
               </button>
               <button type="button" class="action-btn-compact bg-slate-100 text-slate-700" data-action="export-csv" title="Export CSV">
                 <i class="fas fa-file-csv"></i>
+              </button>
+              <div class="h-6 w-px bg-slate-300 mx-1"></div>
+              <button type="button" class="action-btn-compact ${state.focusMode ? 'bg-slate-700 text-white' : 'bg-slate-100 text-slate-700'}" data-action="toggle-focus-mode" title="Focus Mode (F)">
+                <i class="fas ${state.focusMode ? 'fa-compress' : 'fa-expand'}"></i>
               </button>
             </div>
             <button type="button" class="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-semibold transition-colors" data-action="toggle-actions" title="Développer les actions">
@@ -2023,8 +2173,36 @@
     updateUI();
   }
 
-  function toggleHeaderCollapse() {
-    state.headerCollapsed = !state.headerCollapsed;
+  function toggleHeaderVisibility() {
+    state.headerHidden = !state.headerHidden;
+    state.headerHiddenPreference = state.headerHidden; // Persister la préférence
+
+    // Animation fluide
+    const header = qs('header', state.modal);
+    if (header) {
+      if (state.headerHidden) {
+        header.classList.add('hidden');
+      } else {
+        header.classList.remove('hidden');
+      }
+    }
+
+    showToast(
+      `En-tête ${state.headerHidden ? 'masqué' : 'affiché'} (Raccourci: H)`,
+      'info',
+      2000
+    );
+    updateUI();
+  }
+
+  function toggleFocusMode() {
+    if (state.currentStep !== 5) return;
+    state.focusMode = !state.focusMode;
+    showToast(
+      `Mode ${state.focusMode ? 'focus' : 'normal'} activé (Raccourci: F)`,
+      'info',
+      2000
+    );
     updateUI();
   }
 
@@ -2150,13 +2328,21 @@
     if (exportCsvBtn) exportCsvBtn.onclick = exportToCSV;
 
     // Boutons de bascule UI (étape 5)
-    const toggleHeaderBtn = qs('[data-action="toggle-header"]', state.modal);
     const toggleActionsBtn = qs('[data-action="toggle-actions"]', state.modal);
     const toggleStatsCollapseBtn = qs('[data-action="toggle-stats-collapse"]', state.modal);
 
-    if (toggleHeaderBtn) toggleHeaderBtn.onclick = toggleHeaderCollapse;
     if (toggleActionsBtn) toggleActionsBtn.onclick = toggleActionsCollapse;
     if (toggleStatsCollapseBtn) toggleStatsCollapseBtn.onclick = toggleStatsCollapse;
+
+    // Bouton pour masquer/afficher complètement le header (titre + stepper)
+    qsa('[data-action="toggle-header-visibility"]', state.modal).forEach(btn => {
+      btn.onclick = toggleHeaderVisibility;
+    });
+
+    // Toggle focus mode (Phase 5)
+    qsa('[data-action="toggle-focus-mode"]', state.modal).forEach(btn => {
+      btn.onclick = toggleFocusMode;
+    });
 
     qsa('[data-action="set-persist-mode"]', state.modal).forEach(btn => {
       btn.onclick = () => setPersistMode(btn.dataset.value);
@@ -2170,6 +2356,36 @@
     // Initialiser Drag & Drop si on est à l'étape 5
     if (state.currentStep === 5 && state.generatedGroups.length > 0) {
       initializeDragAndDrop();
+    }
+
+    // ═══ RACCOURCIS CLAVIER (Phase 5 uniquement) ═══
+    if (state.keyboardShortcutsEnabled) {
+      documentRef.addEventListener('keydown', (e) => {
+        // Ignorer si on est dans un input/textarea
+        const activeEl = documentRef.activeElement;
+        if (activeEl.matches('input, textarea, [contenteditable]')) {
+          return;
+        }
+
+        // H : Masquer/afficher l'en-tête (Phase 5)
+        if ((e.key === 'h' || e.key === 'H') && state.currentStep === 5) {
+          e.preventDefault();
+          toggleHeaderVisibility();
+        }
+
+        // F : Toggle focus mode (Phase 5)
+        if ((e.key === 'f' || e.key === 'F') && state.currentStep === 5) {
+          e.preventDefault();
+          toggleFocusMode();
+        }
+
+        // S : Toggle statistiques (Phase 5)
+        if ((e.key === 's' || e.key === 'S') && state.currentStep === 5) {
+          e.preventDefault();
+          toggleStatistics();
+          showToast('Statistiques ' + (state.showStatistics ? 'affichées' : 'masquées') + ' (S)', 'info', 1500);
+        }
+      });
     }
   }
 
@@ -3316,8 +3532,67 @@
         to { transform: translateX(0); opacity: 1; }
       }
 
+      @keyframes slide-in-down {
+        from { transform: translateY(-20px); opacity: 0; }
+        to { transform: translateY(0); opacity: 1; }
+      }
+
+      @keyframes slide-out-up {
+        from { transform: translateY(0); opacity: 1; }
+        to { transform: translateY(-20px); opacity: 0; }
+      }
+
       .animate-fade-in { animation: fade-in 0.2s ease; }
       .animate-slide-in { animation: slide-in 0.3s ease; }
+      .animate-slide-in-down { animation: slide-in-down 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+      .animate-slide-out-up { animation: slide-out-up 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+
+      /* HEADER - TRANSITIONS FLUIDES */
+      header {
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        opacity: 1;
+        max-height: 300px;
+      }
+
+      header.hidden {
+        display: none !important;
+        opacity: 0;
+        max-height: 0;
+        overflow: hidden !important;
+        padding: 0 !important;
+        margin: 0 !important;
+      }
+
+      /* FOCUS MODE CSS */
+      .focus-mode header {
+        display: none !important;
+      }
+
+      .focus-mode [data-stepper] {
+        display: none !important;
+      }
+
+      .focus-mode .persistence-controls {
+        display: none !important;
+      }
+
+      .focus-mode .action-toolbar {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: 50px;
+        z-index: 50;
+        overflow-x: auto;
+        overflow-y: hidden;
+        box-shadow: 0 -2px 8px rgba(0,0,0,0.1);
+      }
+
+      .focus-mode #groups-container {
+        padding-bottom: 60px !important;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)) !important;
+        gap: 12px !important;
+      }
 
       /* STEPPER */
       .stepper-step {
@@ -3827,6 +4102,26 @@
       .action-btn-compact:hover {
         transform: translateY(-1px);
         box-shadow: 0 2px 8px -4px rgba(0, 0, 0, 0.2);
+      }
+
+      /* ACTION BUTTONS MICRO (Focus mode) */
+      .action-btn-micro {
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        border-radius: 6px;
+        border: none;
+        font-size: 14px;
+        cursor: pointer;
+        transition: all 200ms;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .action-btn-micro:hover {
+        transform: scale(1.05);
       }
 
       /* SPINNERS */
