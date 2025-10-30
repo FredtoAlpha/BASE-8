@@ -81,7 +81,7 @@
   const state = {
     // Navigation
     currentStep: 1,
-    totalSteps: 2,  // Réduit de 5 à 2 étapes
+    totalSteps: 5,
 
     // Configuration
     groupType: null,                    // 'needs' | 'language' | 'option'
@@ -135,12 +135,10 @@
     // Statistiques
     showStatistics: true,
 
-    // UI Optimisations (étape 2 - interface minimaliste)
+    // UI Optimisations (étape 5)
     headerCollapsed: false,         // Header/stepper repliable
     actionsCollapsed: false,        // Barre d'actions compacte
-    statisticsCollapsed: false,     // Panneau stats collapsible
-    hamburgerMenuOpen: false,       // Menu hamburger pour contrôles avancés
-    showAllControls: false          // Afficher tous les contrôles (mode debug)
+    statisticsCollapsed: false      // Panneau stats collapsible
   };
 
   // ═══════════════════════════════════════════════════════════════
@@ -490,13 +488,13 @@
           </div>
 
           <nav class="flex items-center gap-2" data-stepper>
-            ${[1, 2].map(step => `
+            ${[1, 2, 3, 4, 5].map(step => `
               <div class="flex items-center gap-2 flex-1">
                 <div class="stepper-step ${step <= state.currentStep ? 'active' : ''} ${step === state.currentStep ? 'current' : ''}" data-step="${step}">
                   <span class="step-number">${step}</span>
                   <span class="step-label">${getStepLabel(step)}</span>
                 </div>
-                ${step < 2 ? '<div class="step-connector"></div>' : ''}
+                ${step < 5 ? '<div class="step-connector"></div>' : ''}
               </div>
             `).join('')}
           </nav>
@@ -515,11 +513,9 @@
           <button type="button" class="px-5 py-2.5 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-700 font-semibold transition-colors" data-action="secondary">
             ${getSecondaryButtonLabel()}
           </button>
-          ${getPrimaryButtonLabel() ? `
-            <button type="button" class="px-5 py-2.5 rounded-xl bg-gradient-to-r ${state.groupType ? GROUP_TYPES[state.groupType].color : 'from-indigo-600 to-purple-600'} text-white font-semibold shadow-lg hover:shadow-xl transition-all" data-action="primary">
-              ${getPrimaryButtonLabel()}
-            </button>
-          ` : ''}
+          <button type="button" class="px-5 py-2.5 rounded-xl bg-gradient-to-r ${state.groupType ? GROUP_TYPES[state.groupType].color : 'from-indigo-600 to-purple-600'} text-white font-semibold shadow-lg hover:shadow-xl transition-all" data-action="primary">
+            ${getPrimaryButtonLabel()}
+          </button>
         </div>
       </footer>
     `;
@@ -554,8 +550,11 @@
 
   function getStepLabel(step) {
     const labels = {
-      1: 'Configuration',
-      2: 'Groupes'
+      1: 'Type',
+      2: 'Classes',
+      3: 'Config',
+      4: 'Aperçu',
+      5: 'Groupes'
     };
     return labels[step] || '';
   }
@@ -571,22 +570,14 @@
   }
 
   function getSecondaryButtonLabel() {
-    if (state.currentStep === 1) {
-      if (state.selectedClasses.length > 0) return 'Retour';
-      if (state.groupType) return 'Retour';
-      return 'Fermer';
-    }
-    if (state.currentStep === 2) return 'Reconfigurer';
+    if (state.currentStep === 1) return 'Fermer';
+    if (state.currentStep === 5) return 'Recommencer';
     return 'Précédent';
   }
 
   function getPrimaryButtonLabel() {
-    if (state.currentStep === 1) {
-      // Masquer le bouton si on est sur la config finale (le bouton "Générer" est dans l'aperçu)
-      if (state.groupType && state.selectedClasses.length > 0) return '';
-      return 'Continuer';
-    }
-    if (state.currentStep === 2) return 'Fermer';
+    if (state.currentStep === 4) return 'Générer les groupes';
+    if (state.currentStep === 5) return 'Fermer';
     return 'Continuer';
   }
 
@@ -596,314 +587,17 @@
 
   function renderStepContent() {
     switch (state.currentStep) {
-      case 1: return renderStep1_CompleteConfiguration();
-      case 2: return renderStep2_MinimalistGroups();
+      case 1: return renderStep1_ChooseType();
+      case 2: return renderStep2_SelectClasses();
+      case 3: return renderStep3_Configure();
+      case 4: return renderStep4_Preview();
+      case 5: return renderStep5_Groups();
       default: return '<p class="text-center text-slate-500">Étape inconnue</p>';
     }
   }
 
   // ─────────────────────────────────────────────────────────────
-  //  NOUVELLE ÉTAPE 1 : Configuration complète (fusion 1+2+3+4)
-  // ─────────────────────────────────────────────────────────────
-
-  function renderStep1_CompleteConfiguration() {
-    // Si aucun type sélectionné, afficher la sélection de type
-    if (!state.groupType) {
-      return renderStep1_ChooseType();
-    }
-
-    // Si type sélectionné mais pas de classes, afficher sélection classes
-    if (state.selectedClasses.length === 0) {
-      return renderStep2_SelectClasses();
-    }
-
-    // Sinon, afficher la configuration finale avec aperçu
-    return renderFinalConfiguration();
-  }
-
-  function renderFinalConfiguration() {
-    return `
-      <div class="grid lg:grid-cols-[minmax(0,1fr)_minmax(0,400px)] gap-8">
-        <!-- Colonne gauche : Configuration -->
-        <div class="space-y-6">
-          <div class="bg-white border border-slate-200 rounded-2xl p-6">
-            <h3 class="text-lg font-bold text-slate-900 mb-4">
-              <i class="fas fa-sliders mr-2"></i>Paramètres des groupes
-            </h3>
-            ${renderStep3_Configure()}
-          </div>
-        </div>
-
-        <!-- Colonne droite : Aperçu temps réel -->
-        <div class="space-y-6">
-          <div class="bg-gradient-to-br from-indigo-50 to-purple-50 border-2 border-indigo-200 rounded-2xl p-6 sticky top-4">
-            <h3 class="text-lg font-bold text-slate-900 mb-4">
-              <i class="fas fa-eye mr-2"></i>Aperçu en temps réel
-            </h3>
-            ${renderLivePreview()}
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  function renderLivePreview() {
-    const totalStudents = state.students.length;
-    const groupSize = totalStudents > 0 ? Math.ceil(totalStudents / state.numGroups) : 0;
-    const warnings = [];
-
-    if (groupSize < 8 && groupSize > 0) {
-      warnings.push({ type: 'warning', text: 'Groupes très petits (<8 élèves)' });
-    }
-    if (groupSize > 20) {
-      warnings.push({ type: 'warning', text: 'Groupes très grands (>20 élèves)' });
-    }
-    if (totalStudents === 0) {
-      warnings.push({ type: 'error', text: 'Aucun élève trouvé pour cette configuration' });
-    }
-
-    return `
-      <div class="space-y-4">
-        <!-- Résumé -->
-        <div class="bg-white rounded-xl p-4 border border-indigo-200">
-          <div class="grid grid-cols-2 gap-4">
-            <div>
-              <p class="text-xs text-slate-600 mb-1">Classes</p>
-              <p class="text-2xl font-bold text-indigo-600">${state.selectedClasses.length}</p>
-            </div>
-            <div>
-              <p class="text-xs text-slate-600 mb-1">Élèves</p>
-              <p class="text-2xl font-bold text-indigo-600">${totalStudents}</p>
-            </div>
-            <div>
-              <p class="text-xs text-slate-600 mb-1">Groupes</p>
-              <p class="text-2xl font-bold text-indigo-600">${state.numGroups}</p>
-            </div>
-            <div>
-              <p class="text-xs text-slate-600 mb-1">Taille/groupe</p>
-              <p class="text-2xl font-bold text-indigo-600">~${groupSize}</p>
-            </div>
-          </div>
-        </div>
-
-        <!-- Critères actifs -->
-        <div class="bg-white rounded-xl p-4 border border-indigo-200">
-          <p class="text-xs font-semibold text-slate-700 uppercase mb-2">Critères actifs</p>
-          <div class="space-y-1 text-sm">
-            ${state.groupType === 'needs' ? `
-              <div class="flex items-center gap-2">
-                <i class="fas fa-check text-green-600"></i>
-                <span>Scores ${SUBJECTS[state.selectedSubject].label}</span>
-              </div>
-              <div class="flex items-center gap-2">
-                <i class="fas fa-check text-green-600"></i>
-                <span>Distribution ${state.distributionType === 'heterogeneous' ? 'hétérogène' : 'homogène'}</span>
-              </div>
-            ` : ''}
-            ${state.groupType === 'language' ? `
-              <div class="flex items-center gap-2">
-                <i class="fas fa-check text-green-600"></i>
-                <span>Langue : ${state.selectedLanguage}</span>
-              </div>
-              <div class="flex items-center gap-2">
-                <i class="fas fa-check text-green-600"></i>
-                <span>Priorité : Participation</span>
-              </div>
-            ` : ''}
-            <div class="flex items-center gap-2">
-              <i class="fas fa-check text-green-600"></i>
-              <span>Parité F/M équilibrée</span>
-            </div>
-            <div class="flex items-center gap-2">
-              <i class="fas fa-check text-green-600"></i>
-              <span>Critères COM, TRA, ABS</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Alertes -->
-        ${warnings.length > 0 ? `
-          <div class="space-y-2">
-            ${warnings.map(w => `
-              <div class="bg-${w.type === 'error' ? 'red' : 'amber'}-50 border border-${w.type === 'error' ? 'red' : 'amber'}-200 rounded-lg p-3 flex items-start gap-2">
-                <i class="fas fa-${w.type === 'error' ? 'circle-exclamation' : 'triangle-exclamation'} text-${w.type === 'error' ? 'red' : 'amber'}-600 mt-0.5"></i>
-                <p class="text-sm text-${w.type === 'error' ? 'red' : 'amber'}-900">${w.text}</p>
-              </div>
-            `).join('')}
-          </div>
-        ` : ''}
-
-        <!-- Bouton de génération -->
-        <button 
-          type="button" 
-          class="w-full px-6 py-4 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-bold text-lg shadow-lg hover:shadow-xl transition-all ${totalStudents === 0 ? 'opacity-50 cursor-not-allowed' : ''}"
-          data-action="generate-and-continue"
-          ${totalStudents === 0 ? 'disabled' : ''}
-        >
-          <i class="fas fa-wand-magic-sparkles mr-2"></i>
-          Générer les groupes
-        </button>
-      </div>
-    `;
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  //  NOUVELLE ÉTAPE 2 : Interface minimaliste (groupes uniquement)
-  // ─────────────────────────────────────────────────────────────
-
-  function renderStep2_MinimalistGroups() {
-    if (state.isLoading) {
-      return `
-        <div class="flex flex-col items-center justify-center py-20">
-          <div class="spinner-large mb-6"></div>
-          <p class="text-lg text-slate-600 font-semibold">Génération des groupes en cours...</p>
-        </div>
-      `;
-    }
-
-    if (!state.generatedGroups || state.generatedGroups.length === 0) {
-      return `
-        <div class="flex flex-col items-center justify-center py-20 text-center">
-          <i class="fas fa-inbox text-5xl text-slate-300 mb-4"></i>
-          <p class="text-lg text-slate-600 font-semibold mb-2">Aucun groupe généré</p>
-          <p class="text-sm text-slate-500 mb-6">Retournez à l'étape 1 pour configurer et générer vos groupes.</p>
-        </div>
-      `;
-    }
-
-    // INTERFACE MINIMALISTE : Seulement les groupes + menu hamburger
-    return `
-      <!-- Barre d'outils ultra-compacte -->
-      <div class="fixed top-4 right-4 z-50 flex items-center gap-2">
-        ${!state.showAllControls ? `
-          <!-- Mode minimaliste : icônes uniquement -->
-          <button type="button" class="toolbar-icon-btn ${state.showStatistics ? 'active' : ''}" data-action="toggle-statistics" title="Statistiques">
-            <i class="fas fa-chart-bar"></i>
-          </button>
-          <button type="button" class="toolbar-icon-btn" data-action="regenerate" title="Régénérer">
-            <i class="fas fa-rotate-right"></i>
-          </button>
-          <button type="button" class="toolbar-icon-btn" data-action="hamburger-menu" title="Plus d'options">
-            <i class="fas fa-bars"></i>
-          </button>
-        ` : `
-          <!-- Mode complet : afficher tous les contrôles -->
-          <button type="button" class="toolbar-icon-btn" data-action="toggle-all-controls" title="Masquer les contrôles">
-            <i class="fas fa-compress"></i>
-          </button>
-        `}
-      </div>
-
-      <!-- Menu hamburger (overlay) -->
-      ${state.hamburgerMenuOpen ? renderHamburgerMenu() : ''}
-
-      <!-- Contrôles complets (si activés) -->
-      ${state.showAllControls ? `
-        <div class="mb-6 space-y-4">
-          ${renderActionToolbar()}
-          ${renderPersistenceControls(getActiveRegroupement())}
-        </div>
-      ` : ''}
-
-      <!-- GROUPES EN PLEIN ÉCRAN -->
-      <div class="${state.showStatistics ? 'grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,360px)]' : ''} items-start">
-        <div>
-          <div class="grid ${state.showStatistics ? 'md:grid-cols-2 xl:grid-cols-3' : 'sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6'} gap-4" id="groups-container">
-            ${state.generatedGroups.map((group, index) => renderGroupCard(group, index)).join('')}
-          </div>
-        </div>
-
-        ${state.showStatistics ? `<div class="w-full max-w-[360px]">${renderStatisticsPanel()}</div>` : ''}
-      </div>
-    `;
-  }
-
-  function renderHamburgerMenu() {
-    return `
-      <div class="fixed inset-0 z-[9999] bg-slate-900/50 animate-fade-in" data-action="close-hamburger">
-        <div class="absolute top-0 right-0 w-full max-w-md h-full bg-white shadow-2xl animate-slide-in-right overflow-y-auto">
-          <!-- Header menu -->
-          <div class="sticky top-0 bg-gradient-to-r from-indigo-600 to-purple-600 text-white p-6 flex items-center justify-between">
-            <h3 class="text-lg font-bold">
-              <i class="fas fa-sliders mr-2"></i>Options avancées
-            </h3>
-            <button type="button" class="text-white/80 hover:text-white p-2" data-action="close-hamburger">
-              <i class="fas fa-times text-xl"></i>
-            </button>
-          </div>
-
-          <!-- Contenu menu -->
-          <div class="p-6 space-y-6">
-            <!-- Actions rapides -->
-            <div>
-              <h4 class="text-sm font-semibold text-slate-700 uppercase mb-3">Actions rapides</h4>
-              <div class="space-y-2">
-                <button type="button" class="w-full px-4 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-left text-slate-700 font-medium transition-colors flex items-center gap-3" data-action="regenerate">
-                  <i class="fas fa-rotate-right text-indigo-600"></i>
-                  Régénérer les groupes
-                </button>
-                <button type="button" class="w-full px-4 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-left text-slate-700 font-medium transition-colors flex items-center gap-3" data-action="load-temp-groups">
-                  <i class="fas fa-download text-blue-600"></i>
-                  Charger sauvegarde TEMP
-                </button>
-              </div>
-            </div>
-
-            <!-- Sauvegardes -->
-            <div>
-              <h4 class="text-sm font-semibold text-slate-700 uppercase mb-3">Sauvegardes</h4>
-              <div class="space-y-2">
-                <button type="button" class="w-full px-4 py-3 rounded-xl bg-orange-100 hover:bg-orange-200 text-left text-orange-700 font-medium transition-colors flex items-center gap-3" data-action="save-temp-groups">
-                  <i class="fas fa-save"></i>
-                  Sauver en TEMP
-                </button>
-                <button type="button" class="w-full px-4 py-3 rounded-xl bg-green-100 hover:bg-green-200 text-left text-green-700 font-medium transition-colors flex items-center gap-3" data-action="finalize-temp-groups">
-                  <i class="fas fa-check-circle"></i>
-                  Finaliser les groupes
-                </button>
-              </div>
-            </div>
-
-            <!-- Exports -->
-            <div>
-              <h4 class="text-sm font-semibold text-slate-700 uppercase mb-3">Exports</h4>
-              <div class="space-y-2">
-                <button type="button" class="w-full px-4 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-left text-slate-700 font-medium transition-colors flex items-center gap-3" data-action="export-pdf">
-                  <i class="fas fa-file-pdf text-red-600"></i>
-                  Exporter en PDF
-                </button>
-                <button type="button" class="w-full px-4 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-left text-slate-700 font-medium transition-colors flex items-center gap-3" data-action="export-csv">
-                  <i class="fas fa-file-csv text-green-600"></i>
-                  Exporter en CSV
-                </button>
-              </div>
-            </div>
-
-            <!-- Affichage -->
-            <div>
-              <h4 class="text-sm font-semibold text-slate-700 uppercase mb-3">Affichage</h4>
-              <div class="space-y-2">
-                <button type="button" class="w-full px-4 py-3 rounded-xl ${state.showStatistics ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-700'} hover:bg-indigo-200 text-left font-medium transition-colors flex items-center gap-3" data-action="toggle-statistics">
-                  <i class="fas fa-chart-bar"></i>
-                  ${state.showStatistics ? 'Masquer' : 'Afficher'} les statistiques
-                </button>
-                <button type="button" class="w-full px-4 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-left text-slate-700 font-medium transition-colors flex items-center gap-3" data-action="toggle-all-controls">
-                  <i class="fas fa-expand"></i>
-                  Afficher tous les contrôles
-                </button>
-              </div>
-            </div>
-
-            <!-- Persistance (si nécessaire) -->
-            ${renderPersistenceControls(getActiveRegroupement())}
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  //  ANCIENNES ÉTAPES (conservées pour compatibilité)
+  //  ÉTAPE 1 : Choix du type de groupes
   // ─────────────────────────────────────────────────────────────
 
   function renderStep1_ChooseType() {
@@ -1346,46 +1040,27 @@
 
   function syncActiveRegroupementState() {
     const regroupement = getActiveRegroupement();
-    
-    console.log('[GroupsModule] 🔄 syncActiveRegroupementState - regroupement:', regroupement?.id, regroupement?.label);
-    
     if (!regroupement) {
-      console.log('[GroupsModule] ⚠️ Aucun regroupement actif - réinitialisation complète');
       state.selectedClasses = [];
       state.numGroups = 3;
       state.persistMode = 'replace';
       state.tempOffsetStart = 1;
       state.generatedGroups = [];
-      // 🔴 FIX : Purger les élèves lors de la désactivation
-      state.students = [];
-      state.studentsById = new Map();
       return;
     }
 
-    console.log('[GroupsModule] 📋 Classes du regroupement:', regroupement.classes);
-    console.log('[GroupsModule] 🗑️ Purge des élèves de la passe précédente');
-    
     state.selectedClasses = [...regroupement.classes];
     state.numGroups = regroupement.groupCount || state.numGroups || 3;
     state.persistMode = regroupement.persistMode || state.persistMode || 'replace';
     state.tempOffsetStart = regroupement.offsetStart || (state.persistMode === 'continue' ? (state.continuationData?.suggestedNextIndex || 1) : 1);
 
-    // 🔴 FIX : Purger les élèves de la passe précédente
-    // Forcer le rechargement des élèves des nouvelles classes lors de la prochaine génération
-    state.students = [];
-    state.studentsById = new Map();
-    
-    console.log('[GroupsModule] ✅ Élèves purgés - rechargement forcé lors de la prochaine génération');
-
     const stored = state.groupsByRegroupement?.[regroupement.id];
     if (stored && Array.isArray(stored.groups)) {
-      console.log('[GroupsModule] 📦 Chargement des groupes sauvegardés:', stored.groups.length);
       state.generatedGroups = stored.groups.map(group => ({
         ...group,
         students: group.students.map(student => ({ ...student }))
       }));
     } else {
-      console.log('[GroupsModule] 📭 Aucun groupe sauvegardé pour ce regroupement');
       state.generatedGroups = [];
     }
 
@@ -1448,24 +1123,12 @@
     if (!Array.isArray(state.generatedGroups) || state.generatedGroups.length === 0) return;
 
     const base = Number(state.tempOffsetStart) || 1;
-    
-    console.log('[GroupsModule] 🔢 Application offset - base:', base, 'groupes:', state.generatedGroups.length);
 
     state.generatedGroups.forEach((group, idx) => {
       const existing = Number(group.index);
       const index = Number.isFinite(existing) && existing > 0 ? existing : base + idx;
-      const oldName = group.name;
       group.index = index;
-      
-      // 🔴 FIX : Préserver le nom personnalisé si présent, sinon générer un nom par défaut
-      // Ne pas écraser les noms issus d'un chargement ou d'une saisie utilisateur
-      if (!group.name || group.name === `Groupe ${existing}` || group.name === `Groupe ${idx + 1}`) {
-        group.name = `Groupe ${index}`;
-        console.log(`[GroupsModule]   Groupe ${idx}: "${oldName}" → "${group.name}" (nom par défaut)`);
-      } else {
-        console.log(`[GroupsModule]   Groupe ${idx}: "${group.name}" (nom personnalisé préservé)`);
-      }
-      // Sinon, conserver le nom personnalisé existant
+      group.name = `Groupe ${index}`;
     });
 
     storeGeneratedGroupsForActiveRegroupement();
@@ -1518,15 +1181,16 @@
     const isLanguage = state.groupType === 'language';
 
     return `
-      <div class="max-w-3xl mx-auto">
-        <div class="text-center mb-8">
-          <h3 class="text-2xl font-bold text-slate-900 mb-3">Configuration des groupes</h3>
-          <p class="text-slate-600">Définissez les paramètres de génération</p>
+      <div class="max-w-6xl mx-auto">
+        <div class="text-center mb-4">
+          <h3 class="text-xl font-bold text-slate-900 mb-2">Configuration des groupes</h3>
+          <p class="text-sm text-slate-600">Définissez les paramètres de génération</p>
         </div>
 
         ${renderActiveRegroupementSummary()}
 
-        <div class="config-card mb-6">
+        <div class="grid md:grid-cols-2 gap-4 mb-4">
+        <div class="config-card">
           <div class="config-header">
             <i class="fas fa-layer-group text-2xl text-indigo-600"></i>
             <div>
@@ -1558,7 +1222,7 @@
         </div>
 
         ${isNeeds ? `
-          <div class="config-card mb-6">
+          <div class="config-card">
             <div class="config-header">
               <i class="fas fa-chart-line text-2xl text-blue-600"></i>
               <div>
@@ -1587,7 +1251,7 @@
             </div>
           </div>
 
-          <div class="config-card mb-6">
+          <div class="config-card">
             <div class="config-header">
               <i class="fas fa-shuffle text-2xl text-purple-600"></i>
               <div>
@@ -1615,10 +1279,12 @@
               </div>
             </div>
           </div>
+        </div>
         ` : ''}
 
         ${isLanguage ? `
-          <div class="config-card mb-6">
+        <div class="grid md:grid-cols-1 gap-4">
+          <div class="config-card">
             <div class="config-header">
               <i class="fas fa-language text-2xl text-purple-600"></i>
               <div>
@@ -1661,12 +1327,13 @@
               ` : ''}
             </div>
           </div>
+        </div>
 
-          <div class="bg-purple-50 border border-purple-200 rounded-xl p-4 flex items-start gap-3">
+          <div class="bg-purple-50 border border-purple-200 rounded-xl p-3 flex items-start gap-3 mt-4">
             <i class="fas fa-info-circle text-purple-600 text-xl mt-0.5"></i>
             <div class="text-sm text-purple-900">
               <p class="font-semibold mb-1">À propos de la langue :</p>
-              <p>Les élèves de la langue sélectionnée seront répartis en <strong>${state.numGroups} groupe(s)</strong>. La <strong>participation (PART)</strong> sera le critère prioritaire.</p>
+              <p class="text-xs">Les élèves de la langue sélectionnée seront répartis en <strong>${state.numGroups} groupe(s)</strong>. La <strong>participation (PART)</strong> sera le critère prioritaire.</p>
               ${state.availableLanguages.length === 0 ? '<p class="mt-2 text-purple-700"><i class="fas fa-exclamation-triangle mr-1"></i>Aucune langue LV2 détectée dans les classes sélectionnées.</p>' : ''}
             </div>
           </div>
@@ -2371,21 +2038,6 @@
     updateUI();
   }
 
-  function toggleHamburgerMenu() {
-    state.hamburgerMenuOpen = !state.hamburgerMenuOpen;
-    updateUI();
-  }
-
-  function toggleAllControls() {
-    state.showAllControls = !state.showAllControls;
-    updateUI();
-  }
-
-  function generateAndContinue() {
-    generateGroups();
-    // La génération mettra à jour l'UI et passera à l'étape 2 automatiquement
-  }
-
   // ═══════════════════════════════════════════════════════════════
   //  NAVIGATION & EVENT LISTENERS
   // ═══════════════════════════════════════════════════════════════
@@ -2497,22 +2149,14 @@
     if (exportPdfBtn) exportPdfBtn.onclick = exportToPDF;
     if (exportCsvBtn) exportCsvBtn.onclick = exportToCSV;
 
-    // Boutons de bascule UI (étape 2)
+    // Boutons de bascule UI (étape 5)
     const toggleHeaderBtn = qs('[data-action="toggle-header"]', state.modal);
     const toggleActionsBtn = qs('[data-action="toggle-actions"]', state.modal);
     const toggleStatsCollapseBtn = qs('[data-action="toggle-stats-collapse"]', state.modal);
-    const hamburgerMenuBtn = qs('[data-action="hamburger-menu"]', state.modal);
-    const closeHamburgerBtn = qs('[data-action="close-hamburger"]', state.modal);
-    const toggleAllControlsBtn = qs('[data-action="toggle-all-controls"]', state.modal);
-    const generateAndContinueBtn = qs('[data-action="generate-and-continue"]', state.modal);
 
     if (toggleHeaderBtn) toggleHeaderBtn.onclick = toggleHeaderCollapse;
     if (toggleActionsBtn) toggleActionsBtn.onclick = toggleActionsCollapse;
     if (toggleStatsCollapseBtn) toggleStatsCollapseBtn.onclick = toggleStatsCollapse;
-    if (hamburgerMenuBtn) hamburgerMenuBtn.onclick = toggleHamburgerMenu;
-    if (closeHamburgerBtn) closeHamburgerBtn.onclick = toggleHamburgerMenu;
-    if (toggleAllControlsBtn) toggleAllControlsBtn.onclick = toggleAllControls;
-    if (generateAndContinueBtn) generateAndContinueBtn.onclick = generateAndContinue;
 
     qsa('[data-action="set-persist-mode"]', state.modal).forEach(btn => {
       btn.onclick = () => setPersistMode(btn.dataset.value);
@@ -2523,48 +2167,48 @@
       offsetInput.oninput = handleOffsetInput;
     }
 
-    // Initialiser Drag & Drop si on est à l'étape 2 (groupes)
-    if (state.currentStep === 2 && state.generatedGroups.length > 0) {
+    // Initialiser Drag & Drop si on est à l'étape 5
+    if (state.currentStep === 5 && state.generatedGroups.length > 0) {
       initializeDragAndDrop();
     }
   }
 
   function handlePrimaryAction() {
     if (state.currentStep === 1) {
-      // Étape 1 : gère la progression interne (type → classes → config)
       if (!state.groupType) {
         showToast('Veuillez sélectionner un type de groupes', 'warning');
         return;
       }
+      nextStep();
+    } else if (state.currentStep === 2) {
       if (state.selectedClasses.length === 0) {
         showToast('Veuillez sélectionner au moins une classe', 'warning');
         return;
       }
-      // Si on est sur la config finale, le bouton "Générer" est géré par generate-and-continue
-      // Le bouton "Continuer" ne devrait pas être visible ici
-      updateUI();
-    } else if (state.currentStep === 2) {
-      // Étape 2 : Fermer la modale
+      nextStep();
+    } else if (state.currentStep === 3) {
+      // Validation spécifique pour les groupes LV2
+      if (state.groupType === 'language') {
+        const selectedLangInfo = state.availableLanguages.find(l => l.lang === state.selectedLanguage);
+        if (!selectedLangInfo || selectedLangInfo.count === 0) {
+          showToast(`⚠️ Aucun élève trouvé pour la langue ${state.selectedLanguage}`, 'warning');
+          return;
+        }
+      }
+      nextStep();
+    } else if (state.currentStep === 4) {
+      generateGroups();
+    } else if (state.currentStep === 5) {
       closeModal();
     }
   }
 
   function handleSecondaryAction() {
     if (state.currentStep === 1) {
-      // Retour en arrière dans l'étape 1 ou fermeture
-      if (state.selectedClasses.length > 0) {
-        // Retour à la sélection de classes
-        state.selectedClasses = [];
-        updateUI();
-      } else if (state.groupType) {
-        // Retour à la sélection de type
-        state.groupType = null;
-        updateUI();
-      } else {
-        closeModal();
-      }
-    } else if (state.currentStep === 2) {
-      // Retour à l'étape 1 (configuration)
+      closeModal();
+    } else if (state.currentStep === 5) {
+      resetToStep1();
+    } else {
       previousStep();
     }
   }
@@ -3220,24 +2864,15 @@
     state.loadError = null;
     updateUI();
 
-    // 🔴 FIX : Forcer le rechargement pour les groupes LV2/Options
-    // Car le filtrage dépend de state.selectedLanguage qui peut avoir changé
-    const needsReload = !state.students || state.students.length === 0 || 
-                        state.groupType === 'language' || 
-                        state.groupType === 'option';
-
-    console.log('[GroupsModule] 🔍 generateGroups - needsReload:', needsReload, 'groupType:', state.groupType, 'students:', state.students?.length);
-
-    const ensureStudentsReady = needsReload
-      ? loadStudentsFromClasses()
-      : Promise.resolve(state.students);
+    const ensureStudentsReady = state.students && state.students.length > 0
+      ? Promise.resolve(state.students)
+      : loadStudentsFromClasses();
 
     ensureStudentsReady
       .then(() => {
-        console.log('[GroupsModule] ✅ Élèves prêts:', state.students.length);
         generateGroupsLocally(); // crée state.generatedGroups
         state.isLoading = false;
-        state.currentStep = 2;   // Passer à l'étape 2 (groupes minimalistes)
+        state.currentStep = 5;   // on passe à l'aperçu
         updateUI();
         showToast(`${state.generatedGroups.length} groupes générés`, 'success');
       })
@@ -3880,13 +3515,13 @@
         display: flex;
         align-items: center;
         gap: 1rem;
-        padding: 1.5rem;
+        padding: 1rem;
         background: linear-gradient(135deg, #f8fafc, #f1f5f9);
         border-bottom: 1px solid #e2e8f0;
       }
 
       .config-body {
-        padding: 1.5rem;
+        padding: 1rem;
       }
 
       .radio-card {
@@ -3894,7 +3529,7 @@
         display: flex;
         align-items: center;
         gap: 1rem;
-        padding: 1rem;
+        padding: 0.75rem;
         border: 2px solid #e2e8f0;
         border-radius: 0.75rem;
         cursor: pointer;
@@ -4054,7 +3689,7 @@
       .group-students {
         padding: 1rem;
         min-height: 8rem;
-        max-height: 24rem;
+        max-height: 60rem;
         overflow-y: auto;
       }
 
@@ -4192,53 +3827,6 @@
       .action-btn-compact:hover {
         transform: translateY(-1px);
         box-shadow: 0 2px 8px -4px rgba(0, 0, 0, 0.2);
-      }
-
-      /* TOOLBAR ICON BUTTONS (Étape 2 minimaliste) */
-      .toolbar-icon-btn {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 3rem;
-        height: 3rem;
-        border-radius: 0.75rem;
-        background: white;
-        border: 2px solid #e2e8f0;
-        color: #64748b;
-        font-size: 1.125rem;
-        cursor: pointer;
-        transition: all 0.2s ease;
-        box-shadow: 0 2px 8px -2px rgba(0, 0, 0, 0.1);
-      }
-
-      .toolbar-icon-btn:hover {
-        background: #f8fafc;
-        border-color: #6366f1;
-        color: #6366f1;
-        transform: translateY(-2px);
-        box-shadow: 0 4px 12px -2px rgba(99, 102, 241, 0.3);
-      }
-
-      .toolbar-icon-btn.active {
-        background: linear-gradient(135deg, #6366f1, #7c3aed);
-        border-color: #6366f1;
-        color: white;
-      }
-
-      /* ANIMATIONS */
-      @keyframes slide-in-right {
-        from {
-          transform: translateX(100%);
-          opacity: 0;
-        }
-        to {
-          transform: translateX(0);
-          opacity: 1;
-        }
-      }
-
-      .animate-slide-in-right {
-        animation: slide-in-right 0.3s ease-out;
       }
 
       /* SPINNERS */
